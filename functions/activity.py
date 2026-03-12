@@ -83,7 +83,7 @@ async def activity(action: int):
         await execute(
             wallets,
             portal_task,
-        )
+            random.randint(Settings().random_pause_wallet_after_completion_min, Settings().random_pause_wallet_after_completion_max),        )
 
     elif action == 3:
         await execute(
