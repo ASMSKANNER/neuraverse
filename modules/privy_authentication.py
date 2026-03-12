@@ -44,10 +44,20 @@ class PrivyAuth:
         if self.cookies:
             try:
                 logger.info(f"{self.wallet} | Trying refresh via cookie")
-                if await self.refresh_session_via_cookie():
+                refresh_status = await self.refresh_session_via_cookie()
+
+                if refresh_status is True:
                     self.authentication = True
                     logger.success(f"{self.wallet} | Refresh via cookie: OK (session_token & identity_token & cookies updated)")
                     return True
+                elif refresh_status is None:
+                    # Privy can rate-limit refresh endpoint (429) when many wallets refresh in parallel.
+                    # In this case avoid immediate SIWE fallback that depends on captcha providers.
+                    if self.wallet.session_token and self.wallet.identity_token and self.cookies:
+                        self.authentication = True
+                        logger.warning(f"{self.wallet} | Refresh rate-limited (429), continue with cached session")
+                        return True
+                    logger.warning(f"{self.wallet} | Refresh rate-limited and no cached session available")
                 else:
                     logger.warning(f"{self.wallet} | Refresh via cookie failed → fallback to full SIWE")
 
@@ -69,7 +79,7 @@ class PrivyAuth:
             logger.error(f"{self.wallet} | SIWE exception: {e}")
             return False
 
-    async def refresh_session_via_cookie(self) -> bool:
+    async def refresh_session_via_cookie(self) -> bool | None:
         cookies = {
             k: v
             for k, v in (self.wallet.cookies or {}).items()
@@ -87,7 +97,10 @@ class PrivyAuth:
             response = await self.session.post(url=f"{self.BASE_URL}/sessions", cookies=cookies, headers=headers, json=payload)
 
             if response.status_code != 200:
-                logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
+                if response.status_code == 429:
+                    logger.warning(f"{self.wallet} | Refresh request rate-limited (429). Body: {response.text}")
+                    return None
+                    logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
                 return False
 
         except Exception as e:
