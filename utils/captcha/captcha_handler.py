@@ -221,7 +221,9 @@ class CaptchaHandler:
         return captcha_token
 
     async def cloudflare_token(self, websiteURL:str, websiteKey: str):
-        max_retry = 10
+        # Faucet side frequently changes anti-bot checks; keep retries minimal to avoid
+        # long noisy loops when CapMonster cannot create a task (e.g. 402 responses).
+        max_retry = 1
         captcha_token = None
 
         if not Settings().capmonster_api_key:
