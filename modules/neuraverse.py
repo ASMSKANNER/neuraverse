@@ -215,25 +215,56 @@ class NeuraVerse:
 
             headers = {"Referer": "https://neuraverse.neuraprotocol.io/?section=faucet"}
 
-            response = await self.session.get(url="https://neuraverse.neuraprotocol.io/_next/static/chunks/333-ba15f8c47b5be486.js", headers=headers)
-
-            logger.debug(f"{self.wallet} | Faucet JS chunk status: {response.status_code}")
-
-            if response.status_code != 200:
-                logger.error(f"{self.wallet} | Non-200 JS chunk response in faucet ({response.status_code}). Body: {response.text}")
-                return False
-
             action_id = None
-            js_code = response.text
-
             pattern = r'createServerReference\)\("([a-f0-9]+)"'
-            match = re.search(pattern, js_code)
 
-            if match:
-                action_id = match.group(1)
-                logger.debug(f"{self.wallet} | Action ID extracted successfully: {action_id}")
-            else:
-                logger.error(f"[{self.wallet}] | Failed to extract action ID")
+            # Primary faucet chunk (replacement for the old hardcoded 333-* chunk).
+            response = await self.session.get(
+                url="https://neuraverse.neuraprotocol.io/_next/static/chunks/app/page-efffb88e354d60d1.js",
+                headers=headers,
+            )
+            if response.status_code == 200:
+                match = re.search(pattern, response.text)
+                if match:
+                    action_id = match.group(1)
+                    logger.debug(f"{self.wallet} | Action ID extracted from primary faucet chunk: {action_id}")
+
+            if not action_id:
+                chunk_candidates: list[str] = []
+
+                page_response = await self.session.get(url="https://neuraverse.neuraprotocol.io/?section=faucet", headers=headers)
+                logger.debug(f"{self.wallet} | Faucet page status: {page_response.status_code}")
+
+                if page_response.status_code == 200:
+                    chunk_candidates = list(dict.fromkeys(re.findall(r'/_next/static/chunks/[^"\']+\.js', page_response.text)))
+                    logger.debug(f"{self.wallet} | Found {len(chunk_candidates)} faucet chunk candidates")
+                else:
+                    logger.warning(
+                        f"{self.wallet} | Failed to load faucet page ({page_response.status_code}), fallback to known chunk"
+                    )
+
+                fallback_chunk = "/_next/static/chunks/app/page-efffb88e354d60d1.js"
+                if fallback_chunk not in chunk_candidates:
+                    chunk_candidates.append(fallback_chunk)
+
+                for chunk_path in chunk_candidates:
+                    chunk_url = f"https://neuraverse.neuraprotocol.io{chunk_path}"
+                    chunk_response = await self.session.get(url=chunk_url, headers=headers)
+
+                    if chunk_response.status_code != 200:
+                        logger.debug(f"{self.wallet} | Skip chunk {chunk_path} ({chunk_response.status_code})")
+                        continue
+
+                    match = re.search(pattern, chunk_response.text)
+                    if not match:
+                        continue
+
+                    action_id = match.group(1)
+                    logger.debug(f"{self.wallet} | Action ID extracted from chunk {chunk_path}: {action_id}")
+                    break
+
+            if not action_id:
+                logger.error(f"[{self.wallet}] | Failed to extract action ID from faucet chunks")
                 return False
 
         except Exception as e:
