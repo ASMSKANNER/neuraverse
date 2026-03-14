@@ -488,12 +488,24 @@ class Controller:
 
             for pulse_id in pulse_ids:
                 logger.info(f"{self.wallet} | Collecting pulse: {pulse_id}")
-                await self.portal.collect_single_pulse(pulse_id)
+
+                pulse_collected = await self.portal.collect_single_pulse(pulse_id)
+
                 random_sleep = random.randint(
                     self.settings.random_pause_between_actions_min,
                     self.settings.random_pause_between_actions_max,
                 )
-                logger.success(f"{self.wallet} | Collected pulse {pulse_id}. Next in {random_sleep}s")
+
+                if not pulse_collected:
+                    logger.error(
+                        f"{self.wallet} | Failed to collect pulse {pulse_id}. Next in {random_sleep}s"
+                    )
+                    await asyncio.sleep(random_sleep)
+                    return False
+
+                logger.success(
+                    f"{self.wallet} | Collected pulse {pulse_id}. Next in {random_sleep}s"
+                )
                 await asyncio.sleep(random_sleep)
 
             account_info = await self.portal.get_account_info()
