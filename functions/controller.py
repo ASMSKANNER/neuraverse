@@ -486,10 +486,27 @@ class Controller:
                 f"[{', '.join(pulse_ids) if pulse_ids else 'none'}]"
             )
 
+            max_attempts = 3
+
             for pulse_id in pulse_ids:
                 logger.info(f"{self.wallet} | Collecting pulse: {pulse_id}")
 
-                pulse_collected = await self.portal.collect_single_pulse(pulse_id)
+                pulse_collected = False
+
+                for attempt in range(1, max_attempts + 1):
+                    pulse_collected = await self.portal.collect_single_pulse(pulse_id)
+
+                    if pulse_collected:
+                        break
+
+                    retry_sleep = random.randint(2, 5)
+                    logger.warning(
+                        f"{self.wallet} | Failed to collect pulse {pulse_id} "
+                        f"(attempt {attempt}/{max_attempts}). Retry in {retry_sleep}s"
+                    )
+
+                    if attempt < max_attempts:
+                        await asyncio.sleep(retry_sleep)
 
                 random_sleep = random.randint(
                     self.settings.random_pause_between_actions_min,
@@ -498,7 +515,8 @@ class Controller:
 
                 if not pulse_collected:
                     logger.error(
-                        f"{self.wallet} | Failed to collect pulse {pulse_id}. Next in {random_sleep}s"
+                        f"{self.wallet} | Failed to collect pulse {pulse_id} after {max_attempts} attempts. "
+                        f"Next in {random_sleep}s"
                     )
                     await asyncio.sleep(random_sleep)
                     return False
