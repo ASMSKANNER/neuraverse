@@ -254,11 +254,15 @@ class Controller:
             
             all_quests = await self.portal.get_all_quests()
 
-            if not all_quests:
-                logger.error(f"{self.wallet} | No quests found")
+            if all_quests is None:
+                logger.error(f"{self.wallet} | Failed to fetch quests due to network/auth/API error")
                 return False
 
-            random.shuffle(all_quests)
+            if not all_quests:
+                logger.info(f"{self.wallet} | No quests available for processing")
+                return True
+                
+                random.shuffle(all_quests)
             all_quests.sort(key=lambda quest: quest.get("id") == "claim_faucet")
 
             counts = Counter(q.get("status") for q in all_quests)
@@ -411,7 +415,7 @@ class Controller:
                 "game:visitBridge",
                 "game:visitOracle",
                 "game:visitValidatorHouse",
-                "game:visitObservationDeck",
+#                "game:visitObservationDeck",
             ]
             
             locations = SUPPORTED_LOCATIONS
@@ -419,9 +423,15 @@ class Controller:
 
             for location in locations:
                 logger.info(f"{self.wallet} | Visiting location: {location}")
-                await self.portal.visit_location(location)
+                location_visited = await self.portal.visit_location(location)
                 random_sleep = random.randint(self.settings.random_pause_between_actions_min, self.settings.random_pause_between_actions_max)
-                logger.success(f"{self.wallet} | Visited location {location}. Next in {random_sleep}s")
+ 
+                if not location_visited:
+                    logger.error(f"{self.wallet} | Failed to visit location {location}. Next in {random_sleep}s")
+                    await asyncio.sleep(random_sleep)
+                    return False
+
+            logger.success(f"{self.wallet} | Visited location {location}. Next in {random_sleep}s")
                 await asyncio.sleep(random_sleep)
 
             return True
@@ -456,8 +466,14 @@ class Controller:
 
             for pulse_id in pulse_ids:
                 logger.info(f"{self.wallet} | Collecting pulse: {pulse_id}")
-                await self.portal.collect_single_pulse(pulse_id)
+                pulse_collected = await self.portal.collect_single_pulse(pulse_id)
                 random_sleep = random.randint(self.settings.random_pause_between_actions_min, self.settings.random_pause_between_actions_max)
+
+                if not pulse_collected:
+                    logger.error(f"{self.wallet} | Failed to collect pulse {pulse_id}. Next in {random_sleep}s")
+                    await asyncio.sleep(random_sleep)
+                    return False
+
                 logger.success(f"{self.wallet} | Collected pulse {pulse_id}. Next in {random_sleep}s")
                 await asyncio.sleep(random_sleep)
 
