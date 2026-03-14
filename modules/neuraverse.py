@@ -125,7 +125,10 @@ class NeuraVerse:
             
     async def claim_quest_reward(self, quest: dict) -> bool:
         if not self.privy.authentication:
-            await self.privy.privy_authorize()
+            auth_ok = await self.privy.privy_authorize()
+            if not auth_ok:
+                logger.error(f"{self.wallet} | Privy authorization failed before claim_quest_reward")
+                return False
 
         quest_id = quest.get("id")
         quest_name = quest.get("name")
@@ -140,16 +143,28 @@ class NeuraVerse:
                 json={},
             )
 
-            if response.status_code != 200:
-                logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
+            if response.status_code == 409:
+                logger.warning(
+                    f"{self.wallet} | Quest '{quest_name}' is not claimable right now (409). Body: {response.text}"
+                )
                 return False
 
-            status = response.json().get("status", None)
+            if response.status_code != 200:
+                logger.error(
+                    f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}"
+                )
+                return False
 
-            if not status and status != "claimed":
-                raise ValueError(f"Invalid quest claim response: {response.text}")
+            response_json = response.json()
+            status = response_json.get("status")
 
-            logger.debug(f"{self.wallet} | Reward claimed successfully for quest '{quest_name}' (id={quest_id})")
+            if status != "claimed":
+                logger.error(
+                    f"{self.wallet} | Invalid quest claim response for '{quest_name}': {response.text}"
+                )
+                return False
+
+            logger.debug(f"{self.wallet} | Reward claimed successfully for quest '{quest_name}'")
             return True
 
         except Exception as e:
@@ -158,7 +173,10 @@ class NeuraVerse:
 
     async def collect_single_pulse(self, pulse_id: str) -> bool:
         if not self.privy.authentication:
-            await self.privy.privy_authorize()
+            auth_ok = await self.privy.privy_authorize()
+            if not auth_ok:
+                logger.error(f"{self.wallet} | Privy authorization failed before collect_single_pulse")
+                return False
 
         try:
             logger.debug(f"{self.wallet} | Collecting pulse with id={pulse_id}")
@@ -166,7 +184,7 @@ class NeuraVerse:
             payload = {
                 "type": "pulse:collectPulse",
                 "payload": {
-                    "id": "pulse:" + pulse_id,
+                    "id": f"pulse:{pulse_id}",
                 },
             }
 
@@ -180,6 +198,30 @@ class NeuraVerse:
             if response.status_code != 200:
                 logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
                 return False
+
+            response_text = (response.text or "").strip()
+
+            # Пытаемся распарсить JSON, если он есть
+            response_json = None
+            try:
+                response_json = response.json()
+            except Exception:
+                response_json = None
+
+            # Жёстко отсекаем очевидные серверные ошибки в body
+            lowered = response_text.lower()
+            if any(marker in lowered for marker in ["error", "failed", "invalid", "exception"]):
+                logger.error(f"{self.wallet} | Pulse collect response indicates failure: {response.text}")
+                return False
+
+            # Если API вернул JSON с явным флагом ошибки/успеха — учитываем его
+            if isinstance(response_json, dict):
+                if response_json.get("success") is False:
+                    logger.error(f"{self.wallet} | Pulse collect returned success=false: {response.text}")
+                    return False
+                if "status" in response_json and response_json.get("status") in {"error", "failed", "invalid"}:
+                    logger.error(f"{self.wallet} | Pulse collect returned bad status: {response.text}")
+                    return False
 
             logger.debug(f"{self.wallet} | Pulse collected successfully (id={pulse_id})")
             return True
