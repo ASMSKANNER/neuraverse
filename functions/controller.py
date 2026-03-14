@@ -431,7 +431,7 @@ class Controller:
                     await asyncio.sleep(random_sleep)
                     return False
 
-            logger.success(f"{self.wallet} | Visited location {location}. Next in {random_sleep}s")
+                logger.success(f"{self.wallet} | Visited location {location}. Next in {random_sleep}s")
                 await asyncio.sleep(random_sleep)
 
             return True
