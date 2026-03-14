@@ -254,15 +254,11 @@ class Controller:
             
             all_quests = await self.portal.get_all_quests()
 
-            if all_quests is None:
-                logger.error(f"{self.wallet} | Failed to fetch quests due to network/auth/API error")
+            if not all_quests:
+                logger.error(f"{self.wallet} | No quests found")
                 return False
 
-            if not all_quests:
-                logger.info(f"{self.wallet} | No quests available for processing")
-                return True
-                
-                random.shuffle(all_quests)
+            random.shuffle(all_quests)            
             all_quests.sort(key=lambda quest: quest.get("id") == "claim_faucet")
 
             counts = Counter(q.get("status") for q in all_quests)
@@ -415,7 +411,6 @@ class Controller:
                 "game:visitBridge",
                 "game:visitOracle",
                 "game:visitValidatorHouse",
-#                "game:visitObservationDeck",
             ]
             
             locations = SUPPORTED_LOCATIONS
