@@ -85,7 +85,7 @@ class NeuraVerse:
             logger.error(f"{self.wallet} | Error — {e}")
             return {}
 
-    async def get_all_quests(self) -> list:
+    async def get_all_quests(self) -> list | None:
         if not self.privy.authentication:
             await self.privy.privy_authorize()
 
@@ -100,18 +100,18 @@ class NeuraVerse:
 
             if response.status_code != 200:
                 logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
-                return []
+                return None
 
             all_quest = response.json().get("tasks", [])
 
-            if not all_quest:
+            if all_quest is None:
                 raise ValueError(f"Invalid all quests response: {response.text}")
 
             logger.debug(f"{self.wallet} | All quests fetched successfully")
             return all_quest
         except Exception as e:
             logger.error(f"{self.wallet} | Error — {e}")
-            return []
+            return None
 
     async def claim_quest_reward(self, quest: dict) -> bool:
         if not self.privy.authentication:
