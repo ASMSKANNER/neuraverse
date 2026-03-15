@@ -47,7 +47,7 @@ random_pause_between_actions:
 # Random pause to start wallet in seconds
 random_pause_start_wallet:
   min: 0
-  max: 60
+  max: 120
 
 # Onchain Swaps count
 swaps_count:
