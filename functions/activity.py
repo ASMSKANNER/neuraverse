@@ -30,6 +30,25 @@ def get_start_delay() -> int:
     return random.randint(min_delay, max_delay)
 
 
+def get_task_timeout_seconds(task_name: str) -> int:
+    """
+    Индивидуальные timeout по типам задач.
+    Подобраны консервативно, чтобы не держать зависшие кошельки часами.
+    """
+    timeouts = {
+        "portal_task": 600,             # квесты
+        "update_points": 300,           # update_db_by_user_info
+        "faucet": 300,
+        "connect_socials": 900,
+        "ai_talk": 1800,
+        "swaps": 1800,
+        "bridge": 1800,
+        "bridge_all_to_neura": 1800,
+        "random_activity_task": 3600,   # комплексная активность
+    }
+    return timeouts.get(task_name, 900)
+
+
 async def execute(wallets: List[Wallet], task_func, random_pause_wallet_after_completion: int = 0):
     while True:
         settings = Settings()
@@ -47,11 +66,12 @@ async def execute(wallets: List[Wallet], task_func, random_pause_wallet_after_co
                 f"sleep {start_delay} seconds before start actions"
             )
 
-            # ВАЖНО: стартовая задержка ДО входа в semaphore
+            # ВАЖНО: задержка ДО входа в semaphore
             await asyncio.sleep(start_delay)
 
             async with semaphore:
-                task_timeout_seconds = 3600
+                task_timeout_seconds = get_task_timeout_seconds(task_func.__name__)
+
                 try:
                     await asyncio.wait_for(task_func(wallet), timeout=task_timeout_seconds)
                 except asyncio.TimeoutError:
@@ -59,6 +79,12 @@ async def execute(wallets: List[Wallet], task_func, random_pause_wallet_after_co
                         f"[{wallet.id}] Core Execution Tasks | {task_func.__name__} "
                         f"timed out after {task_timeout_seconds} seconds"
                     )
+                except asyncio.CancelledError:
+                    logger.error(
+                        f"[{wallet.id}] Core Execution Tasks | {task_func.__name__} "
+                        f"cancelled"
+                    )
+                    raise
                 except Exception as e:
                     logger.error(f"[{wallet.id}] failed: {e}")
 
@@ -149,6 +175,9 @@ async def random_activity_task(wallet):
                 )
                 try:
                     await action()
+                except asyncio.CancelledError:
+                    logger.error(f"{wallet} | random_activity_task action cancelled")
+                    raise
                 except Exception as e:
                     logger.error(f"Error — {e}")
                     continue
@@ -158,6 +187,7 @@ async def random_activity_task(wallet):
         await controller.update_db_by_user_info()
 
     except asyncio.CancelledError:
+        logger.error(f"{wallet} | random_activity_task cancelled by timeout")
         raise
     except Exception as e:
         logger.error(f"Core | Random Activity | {wallet} | {e}")
@@ -169,6 +199,9 @@ async def portal_task(wallet):
     controller = Controller(client=client, wallet=wallet)
     try:
         await controller.complete_quests()
+    except asyncio.CancelledError:
+        logger.error(f"{wallet} | portal_task cancelled by timeout")
+        raise
     except Exception as e:
         logger.error(f"Error — {e}")
 
@@ -178,6 +211,9 @@ async def connect_socials(wallet):
     controller = Controller(client=client, wallet=wallet)
     try:
         await controller.connect_socials()
+    except asyncio.CancelledError:
+        logger.error(f"{wallet} | connect_socials cancelled by timeout")
+        raise
     except Exception as e:
         logger.error(f"Error — {e}")
 
@@ -187,6 +223,9 @@ async def update_points(wallet):
     controller = Controller(client=client, wallet=wallet)
     try:
         await controller.update_db_by_user_info()
+    except asyncio.CancelledError:
+        logger.error(f"{wallet} | update_points cancelled by timeout")
+        raise
     except Exception as e:
         logger.error(f"Error — {e}")
 
@@ -196,6 +235,9 @@ async def faucet(wallet):
     controller = Controller(client=client, wallet=wallet)
     try:
         await controller.faucet()
+    except asyncio.CancelledError:
+        logger.error(f"{wallet} | faucet cancelled by timeout")
+        raise
     except Exception as e:
         logger.error(f"Error — {e}")
 
@@ -206,6 +248,9 @@ async def ai_talk(wallet):
     try:
         total_ai_chat = random.randint(Settings().ai_chat_count_min, Settings().ai_chat_count_max)
         await controller.run_ai_chat_session(total_ai_chat=total_ai_chat)
+    except asyncio.CancelledError:
+        logger.error(f"{wallet} | ai_talk cancelled by timeout")
+        raise
     except Exception as e:
         logger.error(f"Error — {e}")
 
@@ -216,6 +261,9 @@ async def swaps(wallet):
     try:
         total_swaps = random.randint(Settings().swaps_count_min, Settings().swaps_count_max)
         await controller.execute_zotto_swaps(total_swaps=total_swaps)
+    except asyncio.CancelledError:
+        logger.error(f"{wallet} | swaps cancelled by timeout")
+        raise
     except Exception as e:
         logger.error(f"Error — {e}")
 
@@ -227,6 +275,9 @@ async def bridge(wallet):
     try:
         total_bridge = random.randint(Settings().bridge_count_min, Settings().bridge_count_max)
         await controller.execute_auto_bridge(total_bridge=total_bridge)
+    except asyncio.CancelledError:
+        logger.error(f"{wallet} | bridge cancelled by timeout")
+        raise
     except Exception as e:
         logger.error(f"Error — {e}")
 
@@ -237,5 +288,8 @@ async def bridge_all_to_neura(wallet):
     controller = Controller(client=client, wallet=wallet, client_sepolia=client_sepolia)
     try:
         await controller.execute_auto_bridge(bridge_all_to_neura=True, total_bridge=1)
+    except asyncio.CancelledError:
+        logger.error(f"{wallet} | bridge_all_to_neura cancelled by timeout")
+        raise
     except Exception as e:
         logger.error(f"Error — {e}")
