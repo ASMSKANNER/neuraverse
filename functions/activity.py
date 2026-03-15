@@ -31,20 +31,16 @@ def get_start_delay() -> int:
 
 
 def get_task_timeout_seconds(task_name: str) -> int:
-    """
-    Индивидуальные timeout по типам задач.
-    Подобраны консервативно, чтобы не держать зависшие кошельки часами.
-    """
     timeouts = {
-        "portal_task": 600,             # квесты
-        "update_points": 300,           # update_db_by_user_info
+        "portal_task": 600,
+        "update_points": 300,
         "faucet": 300,
         "connect_socials": 900,
         "ai_talk": 1800,
         "swaps": 1800,
         "bridge": 1800,
         "bridge_all_to_neura": 1800,
-        "random_activity_task": 3600,   # комплексная активность
+        "random_activity_task": 3600,
     }
     return timeouts.get(task_name, 900)
 
@@ -52,44 +48,61 @@ def get_task_timeout_seconds(task_name: str) -> int:
 async def execute(wallets: List[Wallet], task_func, random_pause_wallet_after_completion: int = 0):
     while True:
         settings = Settings()
-        semaphore = asyncio.Semaphore(min(len(wallets), settings.threads))
 
         if settings.shuffle_wallets:
             random.shuffle(wallets)
 
-        async def sem_task(wallet: Wallet):
-            start_delay = get_start_delay()
-            now = datetime.now()
+        queue: asyncio.Queue[Wallet] = asyncio.Queue()
+        for wallet in wallets:
+            await queue.put(wallet)
 
-            logger.info(
-                f"{wallet} Start at {now + timedelta(seconds=start_delay)} "
-                f"sleep {start_delay} seconds before start actions"
-            )
-
-            # ВАЖНО: задержка ДО входа в semaphore
-            await asyncio.sleep(start_delay)
-
-            async with semaphore:
-                task_timeout_seconds = get_task_timeout_seconds(task_func.__name__)
+        async def worker(worker_id: int):
+            while True:
+                try:
+                    wallet = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
 
                 try:
-                    await asyncio.wait_for(task_func(wallet), timeout=task_timeout_seconds)
-                except asyncio.TimeoutError:
-                    logger.error(
-                        f"[{wallet.id}] Core Execution Tasks | {task_func.__name__} "
-                        f"timed out after {task_timeout_seconds} seconds"
-                    )
-                except asyncio.CancelledError:
-                    logger.error(
-                        f"[{wallet.id}] Core Execution Tasks | {task_func.__name__} "
-                        f"cancelled"
-                    )
-                    raise
-                except Exception as e:
-                    logger.error(f"[{wallet.id}] failed: {e}")
+                    start_delay = get_start_delay()
+                    now = datetime.now()
 
-        tasks = [asyncio.create_task(sem_task(wallet)) for wallet in wallets]
-        await asyncio.gather(*tasks, return_exceptions=True)
+                    logger.info(
+                        f"{wallet} Start at {now + timedelta(seconds=start_delay)} "
+                        f"sleep {start_delay} seconds before start actions"
+                    )
+
+                    await asyncio.sleep(start_delay)
+
+                    task_timeout_seconds = get_task_timeout_seconds(task_func.__name__)
+
+                    try:
+                        await asyncio.wait_for(task_func(wallet), timeout=task_timeout_seconds)
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            f"[{wallet.id}] Core Execution Tasks | {task_func.__name__} "
+                            f"timed out after {task_timeout_seconds} seconds"
+                        )
+                    except asyncio.CancelledError:
+                        logger.error(
+                            f"[{wallet.id}] Core Execution Tasks | {task_func.__name__} cancelled"
+                        )
+                        raise
+                    except Exception as e:
+                        logger.error(f"[{wallet.id}] failed: {e}")
+
+                finally:
+                    queue.task_done()
+
+        workers_count = min(len(wallets), settings.threads)
+        workers = [asyncio.create_task(worker(i + 1)) for i in range(workers_count)]
+
+        await queue.join()
+
+        for w in workers:
+            w.cancel()
+
+        await asyncio.gather(*workers, return_exceptions=True)
 
         if random_pause_wallet_after_completion == 0:
             break
