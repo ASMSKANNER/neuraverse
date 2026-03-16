@@ -1,3 +1,4 @@
+import asyncio
 import re
 import uuid
 from datetime import datetime, timezone
@@ -19,13 +20,15 @@ class PrivyAuth:
     __module__ = "Privy authentication"
     BASE_URL = "https://privy.neuraprotocol.io/api/v1"
 
+    _refresh_semaphore = asyncio.Semaphore(2)
+    _siwe_semaphore = asyncio.Semaphore(1)
+
     def __init__(self, client: Client, wallet: Wallet):
         self.client = client
         self.wallet = wallet
         self.session = Browser()
         self.authentication = False
         self.token_id = self.resolve_privy_ca_id()
-
         self.headers = {
             **DEFAULT_HEADERS,
             "privy-app-id": "cmbpempz2011ll10l7iucga14",
@@ -38,7 +41,10 @@ class PrivyAuth:
 
     @property
     def cookies(self) -> dict:
-        return {k: v for k, v in (self.wallet.cookies or {}).items() if k in {"privy-token", "privy-id-token", "privy-session"}}
+        return {
+            k: v for k, v in (self.wallet.cookies or {}).items()
+            if k in {"privy-token", "privy-id-token", "privy-session"}
+        }
 
     async def privy_authorize(self) -> bool:
         if self.cookies:
@@ -48,8 +54,11 @@ class PrivyAuth:
 
                 if refresh_status is True:
                     self.authentication = True
-                    logger.success(f"{self.wallet} | Refresh via cookie: OK (session_token & identity_token & cookies updated)")
+                    logger.success(
+                        f"{self.wallet} | Refresh via cookie: OK (session_token & identity_token & cookies updated)"
+                    )
                     return True
+
                 elif refresh_status is None:
                     # Privy can rate-limit refresh endpoint (429) when many wallets refresh in parallel.
                     # In this case avoid immediate SIWE fallback that depends on captcha providers.
@@ -57,7 +66,9 @@ class PrivyAuth:
                         self.authentication = True
                         logger.warning(f"{self.wallet} | Refresh rate-limited (429), continue with cached session")
                         return True
+
                     logger.warning(f"{self.wallet} | Refresh rate-limited and no cached session available")
+
                 else:
                     logger.warning(f"{self.wallet} | Refresh via cookie failed → fallback to full SIWE")
 
@@ -66,7 +77,6 @@ class PrivyAuth:
 
         try:
             logger.info(f"{self.wallet} | Getting new session_token via SIWE...")
-
             if await self.authenticate_via_siwe():
                 self.authentication = True
                 logger.success(f"{self.wallet} | SIWE: OK (session_token & identity_token & cookies saved)")
@@ -74,136 +84,158 @@ class PrivyAuth:
             else:
                 logger.error(f"{self.wallet} | SIWE failed: session_token, identity_token or cookies missing")
                 return False
-
         except Exception as e:
             logger.error(f"{self.wallet} | SIWE exception: {e}")
             return False
 
     async def refresh_session_via_cookie(self) -> bool | None:
-        cookies = {
-            k: v
-            for k, v in (self.wallet.cookies or {}).items()
-            if k in {"privy-token", "privy-id-token", "privy-ssesion", "privy-refresh-token", "privy-access-token"}
-        }
+        async with PrivyAuth._refresh_semaphore:
+            cookies = {
+                k: v for k, v in (self.wallet.cookies or {}).items()
+                if k in {
+                    "privy-token",
+                    "privy-id-token",
+                    "privy-ssesion",
+                    "privy-refresh-token",
+                    "privy-access-token",
+                }
+            }
 
-        payload = {"refresh_token": "deprecated"}
+            payload = {"refresh_token": "deprecated"}
 
-        if self.wallet.identity_token:
-            headers = {**self.headers, "authorization": f"Bearer {self.wallet.identity_token}"}
-        else:
-            headers = self.headers
+            if self.wallet.identity_token:
+                headers = {**self.headers, "authorization": f"Bearer {self.wallet.identity_token}"}
+            else:
+                headers = self.headers
 
-        try:
-            response = await self.session.post(url=f"{self.BASE_URL}/sessions", cookies=cookies, headers=headers, json=payload)
+            try:
+                response = await self.session.post(
+                    url=f"{self.BASE_URL}/sessions",
+                    cookies=cookies,
+                    headers=headers,
+                    json=payload,
+                )
 
-            if response.status_code != 200:
-                if response.status_code == 429:
-                    logger.warning(f"{self.wallet} | Refresh request rate-limited (429). Body: {response.text}")
-                    return None
+                if response.status_code != 200:
+                    if response.status_code == 429:
+                        logger.warning(f"{self.wallet} | Refresh request rate-limited (429). Body: {response.text}")
+                        return None
+
                     logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
+                    return False
+
+            except Exception as e:
+                logger.error(f"{self.wallet} | Request failed — {e}")
                 return False
 
-        except Exception as e:
-            logger.error(f"{self.wallet} | Request failed — {e}")
-            return False
+            try:
+                session_token = response.json().get("token")
+                identity_token = response.json().get("identity_token")
+                raw_set_cookie = response.headers.get("set-cookie")
+                cookie_header = self.extract_privy_tokens(raw_set_cookie)
 
-        try:
-            session_token = response.json().get("token")
-            identity_token = response.json().get("identity_token")
+                if not (session_token and identity_token and cookie_header):
+                    logger.error(
+                        f"{self.wallet} | SIWE: FAILED (session_token={bool(session_token)},"
+                        f"identity_token={bool(identity_token)}, cookie={bool(cookie_header)})"
+                    )
+                    raise ValueError(
+                        "SIWE authentication failed: missing required tokens "
+                        "(session_token, identity_token, or cookies)"
+                    )
 
-            raw_set_cookie = response.headers.get("set-cookie")
-            cookie_header = self.extract_privy_tokens(raw_set_cookie)
+                update_wallet_info(address=self.wallet.address, name_column="session_token", data=session_token)
+                update_wallet_info(address=self.wallet.address, name_column="identity_token", data=identity_token)
+                update_wallet_info(address=self.wallet.address, name_column="cookies", data=cookie_header)
 
-            if not (session_token and identity_token and cookie_header):
-                logger.error(
-                    f"{self.wallet} | SIWE: FAILED (session_token={bool(session_token)},"
-                    f"identity_token={bool(identity_token)}, cookie={bool(cookie_header)})"
-                )
-                raise ValueError("SIWE authentication failed: missing required tokens (session_token, identity_token, or cookies)")
+                self.wallet.session_token = session_token
+                self.wallet.identity_token = identity_token
+                self.wallet.cookies = cookie_header
 
-            update_wallet_info(address=self.wallet.address, name_column="session_token", data=session_token)
-            update_wallet_info(address=self.wallet.address, name_column="identity_token", data=identity_token)
-            update_wallet_info(address=self.wallet.address, name_column="cookies", data=cookie_header)
+            except Exception as e:
+                logger.error(f"{self.wallet} | Failed to parse response or extract tokens — {e}")
+                return False
 
-            self.wallet.session_token = session_token
-            self.wallet.identity_token = identity_token
-            self.wallet.cookies = cookie_header
-
-        except Exception as e:
-            logger.error(f"{self.wallet} | Failed to parse response or extract tokens — {e}")
-            return False
-
-        return True
+            return True
 
     async def authenticate_via_siwe(self) -> bool:
-        try:
-            nonce = await self.get_nonce()
-            logger.debug(f"{self.wallet} | Nonce obtained: {nonce[:8] + '...' if nonce else 'None'}")
+        async with PrivyAuth._siwe_semaphore:
+            try:
+                nonce = await self.get_nonce()
+                logger.debug(f"{self.wallet} | Nonce obtained: {nonce[:8] + '...' if nonce else 'None'}")
 
-            if not nonce:
-                logger.error(f"{self.wallet} | No nonce found in /siwe/init response")
-                raise ValueError("SIWE authentication failed: nonce is missing")
+                if not nonce:
+                    logger.error(f"{self.wallet} | No nonce found in /siwe/init response")
+                    raise ValueError("SIWE authentication failed: nonce is missing")
 
-        except Exception as e:
-            logger.error(f"{self.wallet} | Failed to obtain nonce — {e}")
-            return False
-
-        message = self.siwe_message(nonce=nonce)
-        signature = self.client.account.sign_message(signable_message=encode_defunct(text=message))
-
-        payload = {
-            "message": message,
-            "signature": signature.signature.hex(),
-            "chainId": "eip155:267",
-            "walletClientType": "metamask",
-            "connectorType": "injected",
-            "mode": "login-or-sign-up",
-        }
-
-        try:
-            response = await self.session.post(url=f"{self.BASE_URL}/siwe/authenticate", headers=self.headers, json=payload)
-
-            if response.status_code != 200:
-                logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
+            except Exception as e:
+                logger.error(f"{self.wallet} | Failed to obtain nonce — {e}")
                 return False
 
-            session_token = response.json().get("token")
-            identity_token = response.json().get("identity_token")
+            message = self.siwe_message(nonce=nonce)
+            signature = self.client.account.sign_message(signable_message=encode_defunct(text=message))
 
-            raw_set_cookie = response.headers.get("set-cookie")
-            cookie_header = self.extract_privy_tokens(raw_set_cookie)
+            payload = {
+                "message": message,
+                "signature": signature.signature.hex(),
+                "chainId": "eip155:267",
+                "walletClientType": "metamask",
+                "connectorType": "injected",
+                "mode": "login-or-sign-up",
+            }
 
-            if not (session_token and identity_token and cookie_header):
-                logger.error(
-                    f"{self.wallet} | SIWE: FAILED (session_token={bool(session_token)},"
-                    f"identity_token={bool(identity_token)}, cookie={bool(cookie_header)})"
+            try:
+                response = await self.session.post(
+                    url=f"{self.BASE_URL}/siwe/authenticate",
+                    headers=self.headers,
+                    json=payload,
                 )
-                raise ValueError("SIWE authentication failed: missing required tokens (session_token, identity_token, or cookies)")
 
-            update_wallet_info(address=self.wallet.address, name_column="session_token", data=session_token)
-            update_wallet_info(address=self.wallet.address, name_column="identity_token", data=identity_token)
-            update_wallet_info(address=self.wallet.address, name_column="cookies", data=cookie_header)
+                if response.status_code != 200:
+                    logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
+                    return False
 
-            self.wallet.session_token = session_token
-            self.wallet.identity_token = identity_token
-            self.wallet.cookies = cookie_header
+                session_token = response.json().get("token")
+                identity_token = response.json().get("identity_token")
+                raw_set_cookie = response.headers.get("set-cookie")
+                cookie_header = self.extract_privy_tokens(raw_set_cookie)
 
-        except Exception as e:
-            logger.error(f"{self.wallet} | Failed to complete SIWE authentication — {e}")
-            return False
+                if not (session_token and identity_token and cookie_header):
+                    logger.error(
+                        f"{self.wallet} | SIWE: FAILED (session_token={bool(session_token)},"
+                        f"identity_token={bool(identity_token)}, cookie={bool(cookie_header)})"
+                    )
+                    raise ValueError(
+                        "SIWE authentication failed: missing required tokens "
+                        "(session_token, identity_token, or cookies)"
+                    )
 
-        try:
-            analytics_events = await self.send_analytics_events(is_new_user=response.json().get("is_new_user", False))
+                update_wallet_info(address=self.wallet.address, name_column="session_token", data=session_token)
+                update_wallet_info(address=self.wallet.address, name_column="identity_token", data=identity_token)
+                update_wallet_info(address=self.wallet.address, name_column="cookies", data=cookie_header)
 
-            if analytics_events:
-                return True
-            else:
-                logger.error(f"{self.wallet} | Analytics events failed — cannot continue SIWE authentication")
-                raise Exception("SIWE authentication aborted: analytics events could not be sent")
+                self.wallet.session_token = session_token
+                self.wallet.identity_token = identity_token
+                self.wallet.cookies = cookie_header
 
-        except Exception as e:
-            logger.error(f"{self.wallet} | Error — {e}")
-            return False
+            except Exception as e:
+                logger.error(f"{self.wallet} | Failed to complete SIWE authentication — {e}")
+                return False
+
+            try:
+                analytics_events = await self.send_analytics_events(
+                    is_new_user=response.json().get("is_new_user", False)
+                )
+
+                if analytics_events:
+                    return True
+                else:
+                    logger.error(f"{self.wallet} | Analytics events failed — cannot continue SIWE authentication")
+                    raise Exception("SIWE authentication aborted: analytics events could not be sent")
+
+            except Exception as e:
+                logger.error(f"{self.wallet} | Error — {e}")
+                return False
 
     async def get_nonce(self) -> str:
         try:
@@ -231,14 +263,17 @@ class PrivyAuth:
         }
 
         try:
-            response = await self.session.post(url=f"{self.BASE_URL}/siwe/init", headers=self.headers, json=payload)
+            response = await self.session.post(
+                url=f"{self.BASE_URL}/siwe/init",
+                headers=self.headers,
+                json=payload,
+            )
 
             if response.status_code != 200:
                 logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
                 return ""
 
             nonce = response.json().get("nonce")
-
             if not nonce:
                 logger.error(f"{self.wallet} | Nonce missing in response body")
                 raise ValueError("Nonce missing in response")
@@ -252,9 +287,14 @@ class PrivyAuth:
     async def send_analytics_events(self, is_new_user: bool) -> bool:
         try:
             cookies = {
-                k: v
-                for k, v in (self.wallet.cookies or {}).items()
-                if k in {"privy-token", "privy-id-token", "privy-ssesion", "privy-refresh-token", "privy-access-token"}
+                k: v for k, v in (self.wallet.cookies or {}).items()
+                if k in {
+                    "privy-token",
+                    "privy-id-token",
+                    "privy-ssesion",
+                    "privy-refresh-token",
+                    "privy-access-token",
+                }
             }
 
             logger.debug(f"{self.cookies}")
@@ -347,13 +387,17 @@ class PrivyAuth:
     def normalize_proxy(self, proxy: str) -> str:
         if not proxy:
             return ""
+
         try:
             p = urlparse(proxy if "://" in proxy else f"http://{proxy}")
             host = p.hostname or ""
             port = p.port
+
             if not host or not port:
                 return ""
+
             return f"{host}:{port}"
+
         except Exception:
             return ""
 
@@ -367,10 +411,8 @@ class PrivyAuth:
         for m in re.finditer(r"(?P<name>[^=;,\s]+)=(?P<value>[^;\r\n,]+)", set_cookie):
             name = m.group("name").strip()
             value = m.group("value").strip()
-
             if name in wanted:
                 result[name] = value
 
         result["privy-session"] = "privy.neuraprotocol.io"
-
         return result
