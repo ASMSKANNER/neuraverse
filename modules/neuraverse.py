@@ -277,7 +277,6 @@ class NeuraVerse:
             action_id = None
             pattern = r'createServerReference\)\("([a-f0-9]+)"'
 
-            # Primary faucet chunk (replacement for the old hardcoded 333-* chunk).
             response = await self.session.get(
                 url="https://neuraverse.neuraprotocol.io/_next/static/chunks/app/page-efffb88e354d60d1.js",
                 headers=headers,
@@ -440,7 +439,6 @@ class NeuraVerse:
                 logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
                 return False
 
-            # Save faucet_last_claim if server set it
             raw_set_cookie = response.headers.get("set-cookie", "")
             faucet_claim_match = re.search(r"faucet_last_claim=([^;]+)", raw_set_cookie)
             if faucet_claim_match:
@@ -448,7 +446,6 @@ class NeuraVerse:
                 update_wallet_info(address=self.wallet.address, name_column="faucet_last_claim", data=faucet_last_claim)
                 self.wallet.faucet_last_claim = faucet_last_claim
 
-            # Send faucet event if page returned success marker
             event_payload = {
                 "type": "faucet:claim",
             }
