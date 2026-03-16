@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import json
@@ -22,6 +23,9 @@ class NeuraVerse:
     __module__ = "Neuraverse"
     BASE_URL = "https://neuraverse-testnet.infra.neuraprotocol.io/api"
 
+    _tasks_semaphore = asyncio.Semaphore(3)
+    _claim_semaphore = asyncio.Semaphore(2)
+
     def __init__(self, client: Client, wallet: Wallet) -> None:
         self.wallet = wallet
         self.client = client
@@ -42,7 +46,11 @@ class NeuraVerse:
         try:
             logger.debug(f"{self.wallet} | Requesting account info")
 
-            response = await self.session.get(url=f"{self.BASE_URL}/account", cookies=self.privy.cookies, headers=self.headers)
+            response = await self.session.get(
+                url=f"{self.BASE_URL}/account",
+                cookies=self.privy.cookies,
+                headers=self.headers,
+            )
 
             if response.status_code != 200:
                 logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
@@ -54,8 +62,8 @@ class NeuraVerse:
                 raise ValueError(f"Invalid account info response: {response.text}")
 
             logger.debug(f"{self.wallet} | Account info fetched successfully")
-
             return account_info
+
         except Exception as e:
             logger.error(f"{self.wallet} | Error — {e}")
             return {}
@@ -67,7 +75,11 @@ class NeuraVerse:
         try:
             logger.debug(f"{self.wallet} | Requesting leaderboards info")
 
-            response = await self.session.get(url=f"{self.BASE_URL}/leaderboards", cookies=self.privy.cookies, headers=self.headers)
+            response = await self.session.get(
+                url=f"{self.BASE_URL}/leaderboards",
+                cookies=self.privy.cookies,
+                headers=self.headers,
+            )
 
             if response.status_code != 200:
                 logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
@@ -79,8 +91,8 @@ class NeuraVerse:
                 raise ValueError(f"Invalid leaderboards info response: {response.text}")
 
             logger.debug(f"{self.wallet} | Leaderboards info fetched successfully")
-
             return account_info
+
         except Exception as e:
             logger.error(f"{self.wallet} | Error — {e}")
             return {}
@@ -95,16 +107,15 @@ class NeuraVerse:
         try:
             logger.debug(f"{self.wallet} | Requesting all quests")
 
-            response = await self.session.get(
-                url=f"{self.BASE_URL}/tasks",
-                cookies=self.privy.cookies,
-                headers=self.headers,
-            )
+            async with NeuraVerse._tasks_semaphore:
+                response = await self.session.get(
+                    url=f"{self.BASE_URL}/tasks",
+                    cookies=self.privy.cookies,
+                    headers=self.headers,
+                )
 
             if response.status_code != 200:
-                logger.error(
-                    f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}"
-                )
+                logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
                 return None
 
             response_json = response.json()
@@ -122,7 +133,7 @@ class NeuraVerse:
         except Exception as e:
             logger.error(f"{self.wallet} | Error — {e}")
             return None
-            
+
     async def claim_quest_reward(self, quest: dict) -> bool:
         if not self.privy.authentication:
             auth_ok = await self.privy.privy_authorize()
@@ -136,12 +147,13 @@ class NeuraVerse:
         logger.debug(f"{self.wallet} | Claiming reward for quest '{quest_name}' (id={quest_id})")
 
         try:
-            response = await self.session.post(
-                url=f"{self.BASE_URL}/tasks/{quest_id}/claim",
-                cookies=self.privy.cookies,
-                headers=self.headers,
-                json={},
-            )
+            async with NeuraVerse._claim_semaphore:
+                response = await self.session.post(
+                    url=f"{self.BASE_URL}/tasks/{quest_id}/claim",
+                    cookies=self.privy.cookies,
+                    headers=self.headers,
+                    json={},
+                )
 
             if response.status_code == 409:
                 logger.warning(
@@ -150,9 +162,7 @@ class NeuraVerse:
                 return False
 
             if response.status_code != 200:
-                logger.error(
-                    f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}"
-                )
+                logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
                 return False
 
             response_json = response.json()
@@ -201,20 +211,17 @@ class NeuraVerse:
 
             response_text = (response.text or "").strip()
 
-            # Пытаемся распарсить JSON, если он есть
             response_json = None
             try:
                 response_json = response.json()
             except Exception:
                 response_json = None
 
-            # Жёстко отсекаем очевидные серверные ошибки в body
             lowered = response_text.lower()
             if any(marker in lowered for marker in ["error", "failed", "invalid", "exception"]):
                 logger.error(f"{self.wallet} | Pulse collect response indicates failure: {response.text}")
                 return False
 
-            # Если API вернул JSON с явным флагом ошибки/успеха — учитываем его
             if isinstance(response_json, dict):
                 if response_json.get("success") is False:
                     logger.error(f"{self.wallet} | Pulse collect returned success=false: {response.text}")
@@ -236,6 +243,7 @@ class NeuraVerse:
 
         try:
             logger.debug(f"{self.wallet} | Visiting location {location_id}")
+
             payload = {
                 "type": f"{location_id}",
             }
@@ -266,7 +274,6 @@ class NeuraVerse:
             logger.info(f"{self.wallet} | Starting faucet claim process")
 
             headers = {"Referer": "https://neuraverse.neuraprotocol.io/?section=faucet"}
-
             action_id = None
             pattern = r'createServerReference\)\("([a-f0-9]+)"'
 
@@ -275,6 +282,7 @@ class NeuraVerse:
                 url="https://neuraverse.neuraprotocol.io/_next/static/chunks/app/page-efffb88e354d60d1.js",
                 headers=headers,
             )
+
             if response.status_code == 200:
                 match = re.search(pattern, response.text)
                 if match:
@@ -284,7 +292,10 @@ class NeuraVerse:
             if not action_id:
                 chunk_candidates: list[str] = []
 
-                page_response = await self.session.get(url="https://neuraverse.neuraprotocol.io/?section=faucet", headers=headers)
+                page_response = await self.session.get(
+                    url="https://neuraverse.neuraprotocol.io/?section=faucet",
+                    headers=headers,
+                )
                 logger.debug(f"{self.wallet} | Faucet page status: {page_response.status_code}")
 
                 if page_response.status_code == 200:
@@ -315,9 +326,9 @@ class NeuraVerse:
                     logger.debug(f"{self.wallet} | Action ID extracted from chunk {chunk_path}: {action_id}")
                     break
 
-            if not action_id:
-                logger.error(f"[{self.wallet}] | Failed to extract action ID from faucet chunks")
-                return False
+                if not action_id:
+                    logger.error(f"[{self.wallet}] | Failed to extract action ID from faucet chunks")
+                    return False
 
         except Exception as e:
             logger.error(f"{self.wallet} | Error — {e}")
@@ -335,10 +346,7 @@ class NeuraVerse:
                 "priority": "u=1, i",
                 "referer": "https://neuraverse.neuraprotocol.io/?section=faucet",
             }
-
-            params = {
-                "section": "faucet",
-            }
+            params = {"section": "faucet"}
 
             if self.wallet.faucet_last_claim:
                 cookie = {**self.privy.cookies, "faucet_last_claim": self.wallet.faucet_last_claim}
@@ -362,6 +370,7 @@ class NeuraVerse:
                 raise ValueError("Сaptcha token missing")
 
             faucet_nonce = None
+
             try:
                 logger.debug(f"{self.wallet} | Fetching faucet nonce from RSC payload")
 
@@ -378,24 +387,26 @@ class NeuraVerse:
                     cookies=cookie,
                     headers=rsc_headers,
                 )
-
                 logger.debug(f"{self.wallet} | Faucet RSC nonce fetch status: {rsc_response.status_code}")
 
                 if rsc_response.status_code != 200:
                     logger.error(
-                        f"{self.wallet} | Non-200 faucet RSC response while fetching nonce ({rsc_response.status_code}). Body: {rsc_response.text}"
+                        f"{self.wallet} | Non-200 faucet RSC response while fetching nonce ({rsc_response.status_code}). "
+                        f"Body: {rsc_response.text}"
                     )
                 else:
                     text = rsc_response.text
-                    # Try to find a UUID-like nonce near the "initialFaucetNonce" key inside the RSC payload
+
                     nonce_match = re.search(
                         r"initialFaucetNonce[^0-9a-fA-F]{0,300}([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
                         text,
                     )
+
                     if nonce_match:
                         faucet_nonce = nonce_match.group(1)
                     else:
                         logger.error(f"{self.wallet} | Failed to extract faucet nonce from RSC payload")
+
             except Exception as e:
                 logger.error(f"{self.wallet} | Error while fetching faucet nonce — {e}")
 
@@ -429,51 +440,34 @@ class NeuraVerse:
                 logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
                 return False
 
-            if "Insufficient neuraPoints." in response.text:
-                logger.error(f"{self.wallet} | Insufficient neuraPoints.")
-                return False
-
-            elif "Faucet queue full" in response.text:
-                logger.error(f"{self.wallet} | Faucet queue full, please retry in a minute.")
-                return False
-
-            elif "Address has already received" in response.text:
-                logger.warning(f"{self.wallet} | Address has already received")
-                return False
-
-            elif "ANKR distribution successful" in response.text:
-                logger.success(f"{self.wallet} | Faucet claimed successfully")
-
-                ts_ms = int(time.time() * 1000)
-                faucet_last_claim = json.dumps({"timestamp": ts_ms}, separators=(",", ":"))
+            # Save faucet_last_claim if server set it
+            raw_set_cookie = response.headers.get("set-cookie", "")
+            faucet_claim_match = re.search(r"faucet_last_claim=([^;]+)", raw_set_cookie)
+            if faucet_claim_match:
+                faucet_last_claim = faucet_claim_match.group(1)
+                update_wallet_info(address=self.wallet.address, name_column="faucet_last_claim", data=faucet_last_claim)
                 self.wallet.faucet_last_claim = faucet_last_claim
-                update_wallet_info(
-                    address=self.wallet.address,
-                    name_column="faucet_last_claim",
-                    data=faucet_last_claim,
-                )
 
-            else:
-                logger.error(f"{self.wallet} | Faucet response did not match any known substrings: {response.text[:600]}")
-                return False
-
-        except Exception as e:
-            logger.error(f"{self.wallet} | Error — {e}")
-            return False
-
-        try:
-            logger.info(f"{self.wallet} | Sending faucet event")
+            # Send faucet event if page returned success marker
+            event_payload = {
+                "type": "faucet:claim",
+            }
 
             event_response = await self.session.post(
-                url=f"{self.BASE_URL}/events", cookies=self.privy.cookies, headers=self.headers, json={"type": "faucet:claimTokens"}
+                url=f"{self.BASE_URL}/events",
+                cookies=self.privy.cookies,
+                headers=self.headers,
+                json=event_payload,
             )
 
             if event_response.status_code != 200:
-                logger.error(f"{self.wallet} | Non-200 faucet event response ({event_response.status_code}). Body: {event_response.text}")
+                logger.error(
+                    f"{self.wallet} | Non-200 faucet event response ({event_response.status_code}). "
+                    f"Body: {event_response.text}"
+                )
                 raise RuntimeError(f"Non-200 faucet event response ({event_response.status_code})")
 
             logger.success(f"[{self.wallet}] | Faucet event sent successfully")
-
             return True
 
         except Exception as e:
@@ -502,7 +496,6 @@ class NeuraVerse:
                 raise ValueError(f"Invalid validators response: {response.text}")
 
             logger.debug(f"{self.wallet} | Validators list fetched successfully - {all_validator_info}")
-
             return all_validator_info
 
         except Exception as e:
@@ -516,21 +509,23 @@ class NeuraVerse:
         try:
             logger.debug(f"{self.wallet} | Sending chat request to validator {validator_id}")
 
-            response = await self.session.post(url=f"{self.BASE_URL}/game/chat/validator/{validator_id}", headers=self.headers, json=payload)
+            response = await self.session.post(
+                url=f"{self.BASE_URL}/game/chat/validator/{validator_id}",
+                headers=self.headers,
+                json=payload,
+            )
 
             if response.status_code != 200:
                 logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
                 return []
 
             messages_all = response.json().get("messages", [])
-
             content_messages = [message.get("content") for message in messages_all if "content" in message]
 
             if not content_messages:
                 raise ValueError(f"Invalid account info response: {response.text}")
 
             logger.debug(f"{self.wallet} | Chat response received successfully - {content_messages}")
-
             return content_messages
 
         except Exception as e:
@@ -554,7 +549,6 @@ class NeuraVerse:
                 return []
 
             transactions = response.json().get("transactions", [])
-
             logger.debug(f"{self.wallet} | Claim transactions fetched successfully: {len(transactions)} items")
             return transactions
 
@@ -589,7 +583,8 @@ class NeuraVerse:
             }
 
             cookies = {
-                k: v for k, v in (self.wallet.cookies or {}).items() if k in {"privy-token", "privy-id-token", "privy-session", "privy-access-token"}
+                k: v for k, v in (self.wallet.cookies or {}).items()
+                if k in {"privy-token", "privy-id-token", "privy-session", "privy-access-token"}
             }
 
             response = await self.session.post(
@@ -605,7 +600,6 @@ class NeuraVerse:
 
             data = response.json()
             auth_url = data.get("url")
-
             logger.debug(f"{self.wallet} | Twitter OAuth init parsed URL: {auth_url}")
 
             if not auth_url:
@@ -640,7 +634,6 @@ class NeuraVerse:
                 return False
 
             location = response.headers.get("location")
-
             if not location:
                 logger.error(f"{self.wallet} | No Location header in Privy callback response, cannot continue Twitter bind")
                 return False
@@ -658,14 +651,12 @@ class NeuraVerse:
             }
 
             cookies = {
-                k: v
-                for k, v in (self.wallet.cookies or {}).items()
+                k: v for k, v in (self.wallet.cookies or {}).items()
                 if k in {"privy-token", "privy-id-token", "privy-session", "privy-access-token", "privy-refresh-token"}
             }
 
             parsed = urlparse(location)
             params = parse_qs(parsed.query)
-
             authorization_code = params.get("privy_oauth_code", [None])[0]
             state_code = params.get("privy_oauth_state", [None])[0]
 
@@ -679,7 +670,12 @@ class NeuraVerse:
                 "code_verifier": code_verifier,
             }
 
-            response = await self.session.post(url="https://privy.neuraprotocol.io/api/v1/oauth/link", cookies=cookies, headers=headers, json=payload)
+            response = await self.session.post(
+                url="https://privy.neuraprotocol.io/api/v1/oauth/link",
+                cookies=cookies,
+                headers=headers,
+                json=payload,
+            )
 
             if response.status_code != 200:
                 logger.error(f"{self.wallet} | OAuth init failed ({response.status_code}). Body: {response.text}")
@@ -693,7 +689,6 @@ class NeuraVerse:
             await self.privy.privy_authorize()
 
             headers = {k: v for k, v in self.headers.items() if k.lower() != "content-type"}
-
             sync_response = await self.session.post(
                 url=f"{self.BASE_URL}/account/social/sync",
                 cookies=self.privy.cookies,
@@ -701,7 +696,10 @@ class NeuraVerse:
             )
 
             if sync_response.status_code != 200:
-                logger.error(f"{self.wallet} | Non-200 social sync response ({sync_response.status_code}). Body: {sync_response.text}")
+                logger.error(
+                    f"{self.wallet} | Non-200 social sync response ({sync_response.status_code}). "
+                    f"Body: {sync_response.text}"
+                )
                 raise RuntimeError(f"Non-200 social sync response ({sync_response.status_code})")
 
         except Exception as e:
@@ -737,7 +735,8 @@ class NeuraVerse:
             }
 
             cookies = {
-                k: v for k, v in (self.wallet.cookies or {}).items() if k in {"privy-token", "privy-id-token", "privy-session", "privy-access-token"}
+                k: v for k, v in (self.wallet.cookies or {}).items()
+                if k in {"privy-token", "privy-id-token", "privy-session", "privy-access-token"}
             }
 
             response = await self.session.post(
@@ -753,7 +752,6 @@ class NeuraVerse:
 
             data = response.json()
             auth_url = data.get("url")
-
             logger.debug(f"{self.wallet} | Twitter OAuth init parsed URL: {auth_url}")
 
             if not auth_url:
@@ -787,7 +785,6 @@ class NeuraVerse:
                 return False
 
             location = response.headers.get("location")
-
             if not location:
                 logger.error(f"{self.wallet} | No Location header in Privy callback response, cannot continue Twitter bind")
                 return False
@@ -805,14 +802,12 @@ class NeuraVerse:
             }
 
             cookies = {
-                k: v
-                for k, v in (self.wallet.cookies or {}).items()
+                k: v for k, v in (self.wallet.cookies or {}).items()
                 if k in {"privy-token", "privy-id-token", "privy-session", "privy-access-token", "privy-refresh-token"}
             }
 
             parsed = urlparse(location)
             params = parse_qs(parsed.query)
-
             authorization_code = params.get("privy_oauth_code", [None])[0]
             state_code = params.get("privy_oauth_state", [None])[0]
 
@@ -826,7 +821,12 @@ class NeuraVerse:
                 "code_verifier": code_verifier,
             }
 
-            response = await self.session.post(url="https://privy.neuraprotocol.io/api/v1/oauth/link", cookies=cookies, headers=headers, json=payload)
+            response = await self.session.post(
+                url="https://privy.neuraprotocol.io/api/v1/oauth/link",
+                cookies=cookies,
+                headers=headers,
+                json=payload,
+            )
 
             if response.status_code != 200:
                 logger.error(f"{self.wallet} | OAuth init failed ({response.status_code}). Body: {response.text}")
@@ -840,7 +840,6 @@ class NeuraVerse:
             await self.privy.privy_authorize()
 
             headers = {k: v for k, v in self.headers.items() if k.lower() != "content-type"}
-
             sync_response = await self.session.post(
                 url=f"{self.BASE_URL}/account/social/sync",
                 cookies=self.privy.cookies,
@@ -848,7 +847,10 @@ class NeuraVerse:
             )
 
             if sync_response.status_code != 200:
-                logger.error(f"{self.wallet} | Non-200 social sync response ({sync_response.status_code}). Body: {sync_response.text}")
+                logger.error(
+                    f"{self.wallet} | Non-200 social sync response ({sync_response.status_code}). "
+                    f"Body: {sync_response.text}"
+                )
                 raise RuntimeError(f"Non-200 social sync response ({sync_response.status_code})")
 
         except Exception as e:
