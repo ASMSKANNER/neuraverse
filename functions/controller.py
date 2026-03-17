@@ -293,7 +293,7 @@ class Controller:
                 # new ids from updated site
                 "DAILY_LOGIN",
                 "COLLECT_PULSES",
-                #"VISIT_ALL_LOCATIONS",
+                "VISIT_ALL_LOCATIONS",
                 #"BRIDGE_ANKR",
                 #"zotto_swap_1k",
                 #"zotto_swap_10k",
@@ -473,10 +473,17 @@ class Controller:
     async def visit_all_supported_locations(self) -> bool:
         try:
             supported_locations = [
+                "game:visitValidatorHouse",
+                "game:visitOracle",
                 "game:visitFountain",
                 "game:visitBridge",
-                "game:visitOracle",
-                "game:visitValidatorHouse",
+                "game:visitObservationDeck",
+                "game:visitGrandExchange",
+                "game:visitIronVault",
+                "game:visitMarketOfFate",
+                "game:visitShip",
+                "game:visitCastle",
+                "game:visitWindmill",
             ]
 
             locations = list(supported_locations)
