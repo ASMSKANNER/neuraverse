@@ -315,8 +315,8 @@ class Controller:
                         actionable_not_completed.append(quest)
                     else:
                         total_skipped_unsupported += 1
-                        logger.debug(
-                            f"{self.wallet} | Unsupported quest skipped: {quest.get('name')} (id={quest_id})"
+                        logger.info(
+                            f"{self.wallet} | Unsupported quest skipped: {quest.get('name')} (id={quest_id}, status={status})"
                         )
 
             actionable_not_completed.sort(key=lambda q: q.get("id") == "claim_faucet")
