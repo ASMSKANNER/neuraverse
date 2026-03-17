@@ -272,6 +272,13 @@ class Controller:
                 "collect_all_pulses",
                 "visit_all_map",
                 "claim_faucet",
+                "DAILY_LOGIN",
+                "COLLECT_PULSES",
+                "VISIT_ALL_LOCATIONS",
+                #"CLAIM_FAUCET",
+                "BRIDGE_ANKR",
+                "zotto_swap_1k",
+                "zotto_swap_10k",
             }
 
             if self.wallet.twitter_token:
@@ -407,31 +414,42 @@ class Controller:
             logger.error(f"{self.wallet} | Error — {e}")
             return False
 
-    async def execute_single_quest(self, quest: dict) -> bool:
-        try:
-            quest_id = quest.get("id")
-            quest_name = quest.get("name")
+async def execute_single_quest(self, quest: dict) -> bool:
+    try:
+        quest_id = quest.get("id")
+        quest_name = quest.get("name")
 
-            if quest_id == "daily_login":
-                return True
-            elif quest_id == "collect_all_pulses":
-                return await self.collect_all_pulses()
-            elif quest_id == "visit_all_map":
-                return await self.visit_all_supported_locations()
-            elif quest_id == "claim_faucet":
-                await self.portal.visit_location("faucet:visit")
-                return await self.portal.faucet()
-            elif quest_id == "twitter_follow_neura_official":
-                return await self.follow_twitter(account_name="Neura_io")
-            elif quest_id == "twitter_follow_zotto_official":
-                return await self.follow_twitter(account_name="zottoHQ")
-            else:
-                raise TypeError(f"Quest {quest_name} not supported yet")
+        if quest_id in {"daily_login", "DAILY_LOGIN"}:
+            return True
 
-        except Exception as e:
-            logger.error(f"{self.wallet} | Error — {e}")
-            return False
+        elif quest_id in {"collect_all_pulses", "COLLECT_PULSES"}:
+            return await self.collect_all_pulses()
 
+        elif quest_id in {"visit_all_map", "VISIT_ALL_LOCATIONS"}:
+            return await self.visit_all_supported_locations()
+
+        elif quest_id in {"claim_faucet", "CLAIM_FAUCET"}:
+            await self.portal.visit_location("faucet:visit")
+            return await self.portal.faucet()
+
+        elif quest_id == "twitter_follow_neura_official":
+            return await self.follow_twitter(account_name="Neura_io")
+
+        elif quest_id == "twitter_follow_zotto_official":
+            return await self.follow_twitter(account_name="zottoHQ")
+
+        elif quest_id == "BRIDGE_ANKR":
+            return True
+
+        elif quest_id in {"zotto_swap_1k", "zotto_swap_10k"}:
+            return True
+
+        else:
+            raise TypeError(f"Quest {quest_name} not supported yet (id={quest_id})")
+
+    except Exception as e:
+        logger.error(f"{self.wallet} | Error — {e}")
+        return False
     async def visit_all_supported_locations(self) -> bool:
         try:
             supported_locations = [
