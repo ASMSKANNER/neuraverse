@@ -293,10 +293,10 @@ class Controller:
                 # new ids from updated site
                 "DAILY_LOGIN",
                 "COLLECT_PULSES",
-                "VISIT_ALL_LOCATIONS",
-                "BRIDGE_ANKR",
-                "zotto_swap_1k",
-                "zotto_swap_10k",
+                #"VISIT_ALL_LOCATIONS",
+                #"BRIDGE_ANKR",
+                #"zotto_swap_1k",
+                #"zotto_swap_10k",
             }
 
             if self.wallet.twitter_token:
