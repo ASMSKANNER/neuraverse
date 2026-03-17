@@ -166,21 +166,26 @@ class NeuraVerse:
                 return False
 
             response_json = response.json()
+
+            ok_value = response_json.get("ok")
+            if ok_value is True or ok_value == "true":
+                logger.debug(f"{self.wallet} | Reward claimed successfully for quest '{quest_name}'")
+                return True
+
             status = response_json.get("status")
+            if status == "claimed":
+                logger.debug(f"{self.wallet} | Reward claimed successfully for quest '{quest_name}'")
+                return True
 
-            if status != "claimed":
-                logger.error(
-                    f"{self.wallet} | Invalid quest claim response for '{quest_name}': {response.text}"
-                )
-                return False
-
-            logger.debug(f"{self.wallet} | Reward claimed successfully for quest '{quest_name}'")
-            return True
+            logger.error(
+                f"{self.wallet} | Invalid quest claim response for '{quest_name}': {response.text}"
+            )
+            return False
 
         except Exception as e:
             logger.error(f"{self.wallet} | Error — {e}")
             return False
-
+            
     async def collect_single_pulse(self, pulse_id: str) -> bool:
         if not self.privy.authentication:
             auth_ok = await self.privy.privy_authorize()
