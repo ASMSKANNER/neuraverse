@@ -300,7 +300,7 @@ class Controller:
                 try:
                     if quest_status == "notCompleted":
                         if quest_id not in supported_quest:
-                            logger.debug(f"{self.wallet} | Unsupported quest skipped: {quest_name}")
+                            logger.info(f"{self.wallet} | Unsupported quest skipped: {quest_name}")
                             continue
 
                         logger.info(f"{self.wallet} | Running quest: {quest_name} ({quest_points} pts)")
