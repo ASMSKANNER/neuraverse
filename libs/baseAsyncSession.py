@@ -1,9 +1,15 @@
 from curl_cffi import requests
 
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/142.0.0.0 Safari/537.36"
+)
+
 FINGERPRINT_DEFAULT = {
     "impersonate": "chrome",
     "headers": {
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+        "user-agent": DEFAULT_USER_AGENT,
         "sec-ch-ua-platform": "Windows",
         "sec-ch-ua": '"Google Chrome";v="142", "Not?A_Brand";v="99", "Chromium";v="142"',
         "sec-ch-ua-mobile": "?0",
@@ -11,13 +17,18 @@ FINGERPRINT_DEFAULT = {
     },
 }
 
-
 FINGERPRINT_MAC136 = {
     "impersonate": "chrome136",
-    "user-agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"),
-    "sec-ch-ua-platform": "macOS",
-    "sec-ch-ua": '"Google Chrome";v="136", "Chromium";v="136", "Not_A Brand";v="24"',
-    "accept-language": "en-US,en;q=0.9",
+    "headers": {
+        "user-agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/136.0.0.0 Safari/537.36"
+        ),
+        "sec-ch-ua-platform": "macOS",
+        "sec-ch-ua": '"Google Chrome";v="136", "Chromium";v="136", "Not_A Brand";v="24"',
+        "accept-language": "en-US,en;q=0.9",
+    },
 }
 
 
@@ -29,7 +40,6 @@ class BaseAsyncSession(requests.AsyncSession):
         **session_kwargs,
     ):
         headers = session_kwargs.pop("headers", {})
-
         headers.update(fingerprint.get("headers", {}))
 
         init_kwargs = {
