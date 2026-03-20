@@ -12,15 +12,9 @@ from data.settings import Settings
 
 
 class CaptchaHandler:
-    """Handler for Cloudflare Turnstile protection"""
+    """Handler for captcha solving via CapMonster"""
 
     def __init__(self, wallet: Wallet):
-        """
-        Initialize Cloudflare handler
-
-        Args:
-            browser: Browser instance for making requests
-        """
         self.browser = Browser(wallet=wallet)
 
     async def parse_proxy(self) -> Tuple[Optional[str], Optional[int], Optional[str], Optional[str]]:
@@ -44,80 +38,59 @@ class CaptchaHandler:
 
     def encode_html_to_base64(self, html_content: str) -> str:
         """
-        Encode HTML to base64
-
-        Args:
-            html_content: HTML content to encode
-
-        Returns:
-            HTML encoded in base64
+        Encode HTML to base64 (kept for compatibility, not used in hCaptcha)
         """
-        # Equivalent to encodeURIComponent in JavaScript
         encoded = urllib.parse.quote(html_content)
-
-        # Equivalent to unescape in JavaScript (replace %xx sequences)
         unescaped = urllib.parse.unquote(encoded)
-
-        # Equivalent to btoa in JavaScript
         base64_encoded = base64.b64encode(unescaped.encode('latin1')).decode('ascii')
-
         return base64_encoded
 
-    async def get_recaptcha_task(self, websiteURL: str, captcha_id: str, challenge: str) -> Optional[int]:
+    async def get_hcaptcha_task(self, websiteURL: str, siteKey: str) -> Optional[int]:
         """
-        Create task for solving Cloudflare Turnstile in CapMonster
+        Create task for solving hCaptcha in CapMonster
 
         Args:
-            html: HTML page with captcha
+            websiteURL: URL of the page with hCaptcha
+            siteKey: hCaptcha sitekey
 
         Returns:
             Task ID or None in case of error
         """
         try:
-            # Parse proxy
             ip, port, login, password = await self.parse_proxy()
 
-            # Encode HTML to base64
-            windows_user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
-
-            # Data for CapMonster request
             json_data = {
                 "clientKey": Settings().capmonster_api_key,
                 "task": {
-                    "type": "GeeTestTask",
-                    "websiteURL": f"{websiteURL}",
-                    "gt": captcha_id,
-                    "challenge": challenge,
-                    "version": 4,
-                    "userAgent": windows_user_agent
+                    "type": "HCaptchaTaskProxyless",  # default without proxy
+                    "websiteURL": websiteURL,
+                    "websiteKey": siteKey,
                 }
             }
 
-            # Add proxy data if available
+            # Use proxy if available
             if ip and port:
+                json_data["task"]["type"] = "HCaptchaTask"
                 json_data["task"].update({
                     "proxyType": "http",
                     "proxyAddress": ip,
                     "proxyPort": port
                 })
-
                 if login and password:
                     json_data["task"].update({
                         "proxyLogin": login,
                         "proxyPassword": password
                     })
 
-            # Create new session and make request
             resp = await self.browser.post(
                 url='https://api.capmonster.cloud/createTask',
                 json=json_data,
             )
 
             if resp.status_code == 200:
-                result = resp.text
-                result = json.loads(result)
+                result = json.loads(resp.text)
                 if result.get('errorId') == 0:
-                    logger.info(f"{self.browser.wallet} created task in CapMonster: {result['taskId']}")
+                    logger.info(f"{self.browser.wallet} created hCaptcha task in CapMonster: {result['taskId']}")
                     return result['taskId']
                 else:
                     logger.error(f"{self.browser.wallet} CapMonster error: {result.get('errorDescription', 'Unknown error')}")
@@ -127,10 +100,10 @@ class CaptchaHandler:
                 return None
 
         except Exception as e:
-            logger.error(f"{self.browser.wallet} error creating task in CapMonster: {str(e)}")
+            logger.error(f"{self.browser.wallet} error creating hCaptcha task: {str(e)}")
             return None
 
-    async def get_recaptcha_token(self, task_id: int) -> Optional[str]:
+    async def get_recaptcha_token(self, task_id: int) -> Optional[dict]:
         """
         Get task result from CapMonster
 
@@ -138,14 +111,13 @@ class CaptchaHandler:
             task_id: Task ID
 
         Returns:
-            cf_clearance token or None in case of error
+            Solution dict (contains token) or None
         """
         json_data = {
             "clientKey": Settings().capmonster_api_key,
             "taskId": task_id
         }
 
-        # Maximum wait time (60 seconds)
         max_attempts = 60
 
         for _ in range(max_attempts):
@@ -156,17 +128,14 @@ class CaptchaHandler:
                 )
 
                 if resp.status_code == 200:
-                    result = resp.text
-                    result = json.loads(result)
+                    result = json.loads(resp.text)
                     if result['status'] == 'ready':
-                        # Get cf_clearance from solution
                         logger.debug(result)
                         if 'solution' in result:
                             return result['solution']
-
-                        logger.error(f"{self.browser.wallet} solution does not contain gee")
-                        return None
-
+                        else:
+                            logger.error(f"{self.browser.wallet} solution does not contain token")
+                            return None
                     elif result['status'] == 'processing':
                         await asyncio.sleep(1)
                         continue
@@ -185,7 +154,17 @@ class CaptchaHandler:
         logger.error(f"{self.browser.wallet} exceeded wait time for CapMonster solution")
         return None
 
-    async def recaptcha_handle(self, websiteURL: str, captcha_id: str, challenge: str) -> dict:
+    async def hcaptcha_token(self, websiteURL: str, siteKey: str) -> Optional[str]:
+        """
+        Solve hCaptcha and return token
+
+        Args:
+            websiteURL: URL of the page with hCaptcha
+            siteKey: hCaptcha sitekey
+
+        Returns:
+            Captcha token or None
+        """
         max_retry = 10
         captcha_token = None
 
@@ -194,97 +173,28 @@ class CaptchaHandler:
 
         for i in range(max_retry):
             try:
-                # Get task for solving Turnstile
-                task = await self.get_recaptcha_task(websiteURL=websiteURL, captcha_id=captcha_id, challenge=challenge)
-                logger.debug(f"{self.browser.wallet} get task from CapMonster {task}")
-                if not task:
-                    logger.error(f"{self.browser.wallet} failed to create task in CapMonster, attempt {i+1}/{max_retry}")
+                task_id = await self.get_hcaptcha_task(websiteURL=websiteURL, siteKey=siteKey)
+                if not task_id:
+                    logger.error(f"{self.browser.wallet} failed to create hCaptcha task, attempt {i+1}/{max_retry}")
                     await asyncio.sleep(2)
                     continue
 
-                # Get task result
-                result = await self.get_recaptcha_token(task_id=task)
+                result = await self.get_recaptcha_token(task_id=task_id)
                 if result:
-                    captcha_token = result
-                    logger.success(f"{self.browser.wallet} successfully obtained captcha token")
-                    break
+                    # For hCaptcha, the token is usually under 'gRecaptchaResponse'
+                    captcha_token = result.get('gRecaptchaResponse') or result.get('token')
+                    if captcha_token:
+                        logger.success(f"{self.browser.wallet} successfully obtained hCaptcha token")
+                        break
+                    else:
+                        logger.warning(f"{self.browser.wallet} solution missing token field, attempt {i+1}/{max_retry}")
                 else:
                     logger.warning(f"{self.browser.wallet} failed to get token, attempt {i+1}/{max_retry}")
-                    await asyncio.sleep(3)
-                    continue
+
+                await asyncio.sleep(3)
 
             except Exception as e:
-                logger.error(f"{self.browser.wallet} error handling captcha: {str(e)}")
+                logger.error(f"{self.browser.wallet} error handling hCaptcha: {str(e)}")
                 await asyncio.sleep(3)
-                continue
 
         return captcha_token
-
-    async def cloudflare_token(self, websiteURL:str, websiteKey: str):
-        # Faucet side frequently changes anti-bot checks; keep retries minimal to avoid
-        # long noisy loops when CapMonster cannot create a task (e.g. 402 responses).
-        max_retry = 1
-        captcha_token = None
-
-        if not Settings().capmonster_api_key:
-            raise Exception("Insert CapMonster Api Key to files/settings.yaml")
-
-        for i in range(max_retry):
-            try:
-                # Get task for solving Turnstile
-                task = await self.get_recaptcha_task_cloudflare(websiteURL=websiteURL, websiterKey=websiteKey)
-                if not task:
-                    logger.error(f"{self.browser.wallet} failed to create task in CapMonster, attempt {i+1}/{max_retry}")
-                    await asyncio.sleep(2)
-                    continue
-
-                # Get task result
-                result = await self.get_recaptcha_token(task_id=task)
-                if result:
-                    captcha_token = result
-                    logger.success(f"{self.browser.wallet} successfully obtained captcha token")
-                    break
-                else:
-                    logger.warning(f"{self.browser.wallet} failed to get token, attempt {i+1}/{max_retry}")
-                    await asyncio.sleep(3)
-                    continue
-
-            except Exception as e:
-                logger.error(f"{self.browser.wallet} error handling captcha: {str(e)}")
-                await asyncio.sleep(3)
-                continue
-
-        return captcha_token
-
-    async def get_recaptcha_task_cloudflare(self, websiteURL: str, websiterKey: str):
-        try:
-            # Data for CapMonster request
-            json_data = {
-                "clientKey": Settings().capmonster_api_key,
-                "task": {
-                    "type": "TurnstileTask",
-                    "websiteURL": f"{websiteURL}",
-                    "websiteKey": f"{websiterKey}"
-                }
-            }
-            resp = await self.browser.post(
-                url='https://api.capmonster.cloud/createTask',
-                json=json_data,
-            )
-
-            if resp.status_code == 200:
-                result = resp.text
-                result = json.loads(result)
-                if result.get('errorId') == 0:
-                    logger.info(f"{self.browser.wallet} created task in CapMonster: {result['taskId']}")
-                    return result['taskId']
-                else:
-                    logger.error(f"{self.browser.wallet} CapMonster error: {result.get('errorDescription', 'Unknown error')}")
-                    return None
-            else:
-                logger.error(f"{self.browser.wallet} CapMonster request error: {resp.status_code}")
-                return None
-
-        except Exception as e:
-            logger.error(f"{self.browser.wallet} error creating task in CapMonster: {str(e)}")
-            return None
