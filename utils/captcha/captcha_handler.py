@@ -18,49 +18,52 @@ class CaptchaHandler:
         self.browser = Browser(wallet=wallet)
 
     async def parse_proxy(self) -> Tuple[Optional[str], Optional[int], Optional[str], Optional[str]]:
-        """
-        Parse proxy string into components
-
-        Returns:
-            Tuple[ip, port, login, password]
-        """
+        """Parse proxy string into components"""
         if not self.browser.wallet.proxy:
             return None, None, None, None
 
         parsed = urlparse(self.browser.wallet.proxy)
-
         ip = parsed.hostname
         port = parsed.port
         login = parsed.username
         password = parsed.password
-
         return ip, port, login, password
 
     def encode_html_to_base64(self, html_content: str) -> str:
-        """
-        Encode HTML to base64 (kept for compatibility, not used in hCaptcha)
-        """
+        """Encode HTML to base64 (kept for compatibility)"""
         encoded = urllib.parse.quote(html_content)
         unescaped = urllib.parse.unquote(encoded)
         base64_encoded = base64.b64encode(unescaped.encode('latin1')).decode('ascii')
         return base64_encoded
 
-    async def get_hcaptcha_task(self, websiteURL: str, siteKey: str, is_invisible: bool = True) -> Optional[int]:
+    async def get_hcaptcha_task(self, websiteURL: str, siteKey: str, is_invisible: bool = True, task_type: str = "HCaptchaTurboTask") -> Optional[int]:
+        """
+        Create task for solving hCaptcha in CapMonster
+        Supported task_type: "HCaptchaTurboTask", "HCaptchaTurboTaskProxyless", "HCaptchaTask", "HCaptchaTaskProxyless"
+        """
         try:
             ip, port, login, password = await self.parse_proxy()
-    
-            # Базовые параметры задачи
+
+            # Auto-select appropriate task type based on proxy presence
+            if ip and port:
+                # If proxy exists and task type is proxyless, switch to proxy version
+                if task_type.endswith("Proxyless"):
+                    task_type = task_type.replace("Proxyless", "")
+            else:
+                # If no proxy and task type is not proxyless, add Proxyless suffix
+                if not task_type.endswith("Proxyless"):
+                    task_type = f"{task_type}Proxyless"
+
             task_data = {
-                "type": "HCaptchaTaskProxyless",  # попробуем сначала без прокси
+                "type": task_type,
                 "websiteURL": websiteURL,
                 "websiteKey": siteKey,
                 "isInvisible": is_invisible,
                 "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
             }
-    
-            # Если указан прокси, меняем тип на HCaptchaTask
+
+            # Add proxy if available
             if ip and port:
-                task_data["type"] = "HCaptchaTask"
                 task_data.update({
                     "proxyType": "http",
                     "proxyAddress": ip,
@@ -71,19 +74,19 @@ class CaptchaHandler:
                         "proxyLogin": login,
                         "proxyPassword": password
                     })
-    
+
             json_data = {
                 "clientKey": Settings().capmonster_api_key,
                 "task": task_data,
             }
-    
+
             logger.debug(f"CapMonster task payload: {json_data}")
-    
+
             resp = await self.browser.post(
                 url='https://api.capmonster.cloud/createTask',
                 json=json_data,
             )
-    
+
             if resp.status_code == 200:
                 result = json.loads(resp.text)
                 if result.get('errorId') == 0:
@@ -95,21 +98,13 @@ class CaptchaHandler:
             else:
                 logger.error(f"{self.browser.wallet} CapMonster request error: {resp.status_code}, response: {resp.text}")
                 return None
-    
+
         except Exception as e:
             logger.error(f"{self.browser.wallet} error creating hCaptcha task: {str(e)}")
             return None
-        
+
     async def get_recaptcha_token(self, task_id: int) -> Optional[dict]:
-        """
-        Get task result from CapMonster
-
-        Args:
-            task_id: Task ID
-
-        Returns:
-            Solution dict (contains token) or None
-        """
+        """Get task result from CapMonster"""
         json_data = {
             "clientKey": Settings().capmonster_api_key,
             "taskId": task_id
@@ -151,17 +146,8 @@ class CaptchaHandler:
         logger.error(f"{self.browser.wallet} exceeded wait time for CapMonster solution")
         return None
 
-    async def hcaptcha_token(self, websiteURL: str, siteKey: str) -> Optional[str]:
-        """
-        Solve hCaptcha and return token
-
-        Args:
-            websiteURL: URL of the page with hCaptcha
-            siteKey: hCaptcha sitekey
-
-        Returns:
-            Captcha token or None
-        """
+    async def hcaptcha_token(self, websiteURL: str, siteKey: str, task_type: str = "HCaptchaTurboTask") -> Optional[str]:
+        """Solve hCaptcha and return token"""
         max_retry = 10
         captcha_token = None
 
@@ -170,7 +156,12 @@ class CaptchaHandler:
 
         for i in range(max_retry):
             try:
-                task_id = await self.get_hcaptcha_task(websiteURL=websiteURL, siteKey=siteKey)
+                task_id = await self.get_hcaptcha_task(
+                    websiteURL=websiteURL,
+                    siteKey=siteKey,
+                    is_invisible=True,
+                    task_type=task_type
+                )
                 if not task_id:
                     logger.error(f"{self.browser.wallet} failed to create hCaptcha task, attempt {i+1}/{max_retry}")
                     await asyncio.sleep(2)
