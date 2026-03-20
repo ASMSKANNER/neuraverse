@@ -22,7 +22,7 @@ class PrivyAuth:
     def __init__(self, client: Client, wallet: Wallet):
         self.client = client
         self.wallet = wallet
-        self.session = Browser()
+        self.session = Browser(wallet=self.wallet)
         self.authentication = False
         self.token_id = self.resolve_privy_ca_id()
 
