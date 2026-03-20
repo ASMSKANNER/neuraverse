@@ -134,56 +134,59 @@ class NeuraVerse:
             logger.error(f"{self.wallet} | Error — {e}")
             return None
 
-    async def claim_quest_reward(self, quest: dict) -> bool:
-        if not self.privy.authentication:
-            auth_ok = await self.privy.privy_authorize()
-            if not auth_ok:
-                logger.error(f"{self.wallet} | Privy authorization failed before claim_quest_reward")
-                return False
-
-        quest_id = quest.get("id")
-        quest_name = quest.get("name")
-
-        logger.debug(f"{self.wallet} | Claiming reward for quest '{quest_name}' (id={quest_id})")
-
+    async def claim_quest_reward(self, quest_id: str, title: str) -> bool:
+        url = f"{self.BASE_URL}/tasks/{quest_id}/claim"
+    
+        await self.random_pause()
+    
         try:
-            async with NeuraVerse._claim_semaphore:
-                response = await self.session.post(
-                    url=f"{self.BASE_URL}/tasks/{quest_id}/claim",
-                    cookies=self.privy.cookies,
-                    headers=self.headers,
-                    json={},
-                )
-
-            if response.status_code == 409:
-                logger.warning(
-                    f"{self.wallet} | Quest '{quest_name}' is not claimable right now (409). Body: {response.text}"
-                )
-                return False
-
-            if response.status_code != 200:
-                logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
-                return False
-
-            response_json = response.json()
-
-            ok_value = response_json.get("ok")
-            if ok_value is True or ok_value == "true":
-                logger.debug(f"{self.wallet} | Reward claimed successfully for quest '{quest_name}'")
-                return True
-
-            status = response_json.get("status")
-            if status == "claimed":
-                logger.debug(f"{self.wallet} | Reward claimed successfully for quest '{quest_name}'")
-                return True
-
-            logger.error(
-                f"{self.wallet} | Invalid quest claim response for '{quest_name}': {response.text}"
+            headers = {
+                **self.headers,
+                "authorization": f"Bearer {self.wallet.identity_token}",
+            }
+    
+            response = await self.session.post(
+                url=url,
+                headers=headers,
+                cookies=self.cookies,
+                timeout=30,
             )
-            return False
-
+    
+            if response.status_code != 200:
+                logger.error(
+                    f"{self.wallet} | Failed to claim quest '{title}' "
+                    f"({response.status_code}): {response.text}"
+                )
+                return False
+    
+            try:
+                result = response.json()
+            except Exception:
+                logger.error(
+                    f"{self.wallet} | Non-JSON claim response for '{title}': {response.text}"
+                )
+                return False
+    
+            status = result.get("status")
+            ok_value = result.get("ok")
+    
+            status_normalized = str(status).strip().lower() in {
+                "claimed",
+                "ok",
+                "success",
+            }
+            ok_normalized = ok_value is True or str(ok_value).strip().lower() == "true"
+    
+            if not (status_normalized or ok_normalized):
+                logger.error(
+                    f"{self.wallet} | Invalid quest claim response for '{title}': {response.text}"
+                )
+                return False
+    
+            return True
+    
         except Exception as e:
-            logger.error(f"{self.wallet} | Error — {e}")
+            logger.error(f"{self.wallet} | Error claiming quest '{title}': {e}")
             return False
             
     async def collect_single_pulse(self, pulse_id: str) -> bool:
