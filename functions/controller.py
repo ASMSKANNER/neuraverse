@@ -262,177 +262,157 @@ class Controller:
             return False
 
     async def complete_quests(self) -> bool:
+        logger.info(f"{self.wallet} | Starting quest processing...")
+    
+        def _quest_id(quest: dict) -> str:
+            return str(
+                quest.get("id")
+                or quest.get("taskId")
+                or quest.get("questId")
+                or ""
+            ).strip()
+    
+        def _quest_title(quest: dict) -> str:
+            return str(quest.get("title") or quest.get("name") or _quest_id(quest)).strip()
+    
+        def _is_claimable(quest: dict) -> bool:
+            claimable = quest.get("claimable")
+            if isinstance(claimable, bool):
+                return claimable
+    
+            status = str(quest.get("status") or "").strip().lower()
+            reward_status = str(quest.get("rewardStatus") or "").strip().lower()
+    
+            return status == "claimable" or reward_status == "claimable"
+    
+        def _is_completed(quest: dict) -> bool:
+            completed = quest.get("completed")
+            if isinstance(completed, bool):
+                return completed
+    
+            status = str(quest.get("status") or "").strip().lower()
+            reward_status = str(quest.get("rewardStatus") or "").strip().lower()
+    
+            return (
+                status in {"completed", "claimed"}
+                or reward_status in {"completed", "claimed"}
+            )
+    
         try:
-            logger.info(f"{self.wallet} | Starting quest processing...")
-
-            all_quests = await self.portal.get_all_quests()
-
-            if all_quests is None:
-                logger.error(f"{self.wallet} | Failed to fetch quests due to network/auth/API error")
-                return False
-
-            if not isinstance(all_quests, list):
-                logger.error(f"{self.wallet} | Invalid quests payload type: {type(all_quests).__name__}")
-                return False
-
-            if not all_quests:
-                logger.info(f"{self.wallet} | No quests available for processing")
-                return True
-
-            follow_task_ids = {
-                "twitter_follow_neura_official",
-                "twitter_follow_zotto_official",
-            }
-
-            supported_quest_ids = {
-                # legacy ids
-                "daily_login",
-                "collect_all_pulses",
-                "visit_all_map",
-
-                # new ids from updated site
-                "DAILY_LOGIN",
-                "COLLECT_PULSES",
-                "VISIT_ALL_LOCATIONS",
-                #"BRIDGE_ANKR",
-                #"zotto_swap_1k",
-                #"zotto_swap_10k",
-            }
-
-            if self.wallet.twitter_token:
-                supported_quest_ids |= follow_task_ids
+            all_quests = await self.neuraverse.get_all_quests()
+        except Exception as e:
+            logger.error(f"{self.wallet} | Failed to fetch quests due to network/auth/API error: {e}")
+            return False
+    
+        if not all_quests:
+            logger.error(f"{self.wallet} | Failed to fetch quests due to network/auth/API error")
+            return False
+    
+        supported_ids = (
+            set(self.supported_quest.keys())
+            if isinstance(self.supported_quest, dict)
+            else set(self.supported_quest)
+        )
+        supported_ids = {str(x).strip() for x in supported_ids if str(x).strip()}
+    
+        claimable_quests = []
+        actionable_not_completed = []
+        unsupported_not_completed = []
+    
+        for quest in all_quests:
+            quest_id = _quest_id(quest)
+            if not quest_id:
+                continue
+    
+            if quest_id not in supported_ids:
+                if not _is_completed(quest):
+                    unsupported_not_completed.append(quest)
+                continue
+    
+            if _is_claimable(quest):
+                claimable_quests.append(quest)
+            elif not _is_completed(quest):
+                actionable_not_completed.append(quest)
+    
+        claimable_quests.sort(key=lambda q: 1 if _quest_id(q) == "daily_login" else 0)
+        actionable_not_completed.sort(key=lambda q: 1 if _quest_id(q) == "daily_login" else 0)
+    
+        logger.info(
+            f"{self.wallet} | Quests overview: "
+            f"claimable={len(claimable_quests)}, "
+            f"not_completed={len(actionable_not_completed)}, "
+            f"total={len(all_quests)}"
+        )
+    
+        claimed = 0
+        completed = 0
+        claim_failures = 0
+        complete_failures = 0
+        skipped_unsupported = len(unsupported_not_completed)
+    
+        for quest in claimable_quests:
+            quest_id = _quest_id(quest)
+            title = _quest_title(quest)
+    
+            logger.info(f"{self.wallet} | Claiming reward for quest: {title}")
+    
+            ok = await self.neuraverse.claim_quest_reward(
+                quest_id=quest_id,
+                title=title,
+            )
+    
+            if ok:
+                claimed += 1
+                logger.success(f"{self.wallet} | Successfully claimed quest: {title}")
             else:
-                logger.info(f"{self.wallet} | Twitter token missing — follow quests will be skipped")
-
-            counts = Counter(q.get("status") for q in all_quests)
-            logger.info(
-                f"{self.wallet} | Quests overview: "
-                f"claimable={counts.get('claimable', 0)}, "
-                f"not_completed={counts.get('notCompleted', 0)}, "
-                f"total={len(all_quests)}"
-            )
-
-            async def pause() -> int:
-                sleep_s = random.randint(
-                    self.settings.random_pause_between_actions_min,
-                    self.settings.random_pause_between_actions_max,
-                )
-                await asyncio.sleep(sleep_s)
-                return sleep_s
-
-            total_quest_claimed = 0
-            total_quest_completed = 0
-            total_claim_errors = 0
-            total_complete_errors = 0
-            total_skipped_unsupported = 0
-
-            actionable_claimable = []
-            actionable_not_completed = []
-
-            for quest in all_quests:
-                status = quest.get("status")
-                quest_id = quest.get("id")
-
-                if status == "claimable":
-                    actionable_claimable.append(quest)
-                elif status == "notCompleted":
-                    if quest_id in supported_quest_ids:
-                        actionable_not_completed.append(quest)
-                    else:
-                        total_skipped_unsupported += 1
-                        logger.info(
-                            f"{self.wallet} | Unsupported quest skipped: "
-                            f"{quest.get('name')} (id={quest_id}, status={status})"
-                        )
-
-            actionable_not_completed.sort(
-                key=lambda q: q.get("id") in {"daily_login", "DAILY_LOGIN"}
-            )
-
-            for quest in actionable_claimable:
-                quest_name = quest.get("name")
-                try:
-                    logger.info(f"{self.wallet} | Claiming reward for quest: {quest_name}")
-                    claim_result = await self.portal.claim_quest_reward(quest)
-                    sleep_s = await pause()
-
-                    if not claim_result:
-                        total_claim_errors += 1
-                        logger.error(
-                            f"{self.wallet} | Failed to claim quest: {quest_name}. "
-                            f"Next action in {sleep_s}s"
-                        )
-                    else:
-                        total_quest_claimed += 1
-                        logger.success(
-                            f"{self.wallet} | Successfully claimed quest: {quest_name}. "
-                            f"Next action in {sleep_s}s"
-                        )
-
-                except Exception as e:
-                    total_claim_errors += 1
-                    logger.error(f"{self.wallet} | Error while claiming quest '{quest_name}': {e}")
-
-            for quest in actionable_not_completed:
-                quest_id = quest.get("id")
-                quest_name = quest.get("name")
-                quest_points = quest.get("points")
-
-                try:
-                    logger.info(f"{self.wallet} | Running quest: {quest_name} ({quest_points} pts)")
-                    completion_result = await self.execute_single_quest(quest)
-                    sleep_s = await pause()
-
-                    if not completion_result:
-                        total_complete_errors += 1
-                        logger.error(
-                            f"{self.wallet} | Failed to complete quest: {quest_name}. "
-                            f"Next action in {sleep_s}s"
-                        )
-                        continue
-
-                    total_quest_completed += 1
-
-                    if quest_id in follow_task_ids:
-                        logger.info(
-                            f"{self.wallet} | Quest '{quest_name}' completed ({quest_points} pts). "
-                            f"Reward may become claimable later."
-                        )
-                        continue
-
-                    logger.success(f"{self.wallet} | Quest '{quest_name}' completed ({quest_points} pts)")
-
-                    logger.info(f"{self.wallet} | Claiming reward for quest: {quest_name}")
-                    claim_result = await self.portal.claim_quest_reward(quest)
-                    sleep_s = await pause()
-
-                    if not claim_result:
-                        total_claim_errors += 1
-                        logger.error(
-                            f"{self.wallet} | Failed to claim quest: {quest_name}. "
-                            f"Next action in {sleep_s}s"
-                        )
-                    else:
-                        total_quest_claimed += 1
-                        logger.success(
-                            f"{self.wallet} | Successfully claimed quest: {quest_name}. "
-                            f"Next action in {sleep_s}s"
-                        )
-
-                except Exception as e:
-                    total_complete_errors += 1
-                    logger.error(f"{self.wallet} | Error while processing quest '{quest_name}': {e}")
-
-            logger.info(
-                f"{self.wallet} | Quests summary: "
-                f"claimed={total_quest_claimed}, "
-                f"completed={total_quest_completed}, "
-                f"claim_failures={total_claim_errors}, "
-                f"complete_failures={total_complete_errors}, "
-                f"skipped_unsupported={total_skipped_unsupported}"
-            )
-
-            return total_claim_errors == 0 and total_complete_errors == 0
+                claim_failures += 1
+                logger.error(f"{self.wallet} | Failed to claim quest: {title}")
+    
+        for quest in actionable_not_completed:
+            quest_id = _quest_id(quest)
+            title = _quest_title(quest)
+            quest_id_l = quest_id.lower()
+    
+            logger.info(f"{self.wallet} | Completing quest: {title}")
+    
+            try:
+                if quest_id_l in {"collect_all_pulses", "collect_pulses"}:
+                    ok = await self.collect_all_pulses()
+    
+                elif quest_id_l in {
+                    "visit_all_map",
+                    "visit_all_locations",
+                    "visit_all_map_locations_in_a_week",
+                }:
+                    ok = await self.visit_all_supported_locations()
+    
+                else:
+                    ok = await self.neuraverse.complete_quest(
+                        quest_id=quest_id,
+                        title=title,
+                    )
+    
+                if ok:
+                    completed += 1
+                    logger.success(f"{self.wallet} | Successfully completed quest: {title}")
+                else:
+                    complete_failures += 1
+                    logger.error(f"{self.wallet} | Failed to complete quest: {title}")
+    
+            except Exception as e:
+                complete_failures += 1
+                logger.error(f"{self.wallet} | Error while completing quest '{title}': {e}")
+    
+        logger.info(
+            f"{self.wallet} | Quests summary: "
+            f"claimed={claimed}, "
+            f"completed={completed}, "
+            f"claim_failures={claim_failures}, "
+            f"complete_failures={complete_failures}, "
+            f"skipped_unsupported={skipped_unsupported}"
+        )
+    
+        return claim_failures == 0 and complete_failures == 0
 
         except Exception as e:
             logger.error(f"{self.wallet} | Error — {e}")
