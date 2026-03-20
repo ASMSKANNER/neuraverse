@@ -45,48 +45,45 @@ class CaptchaHandler:
         base64_encoded = base64.b64encode(unescaped.encode('latin1')).decode('ascii')
         return base64_encoded
 
-    async def get_hcaptcha_task(self, websiteURL: str, siteKey: str) -> Optional[int]:
-        """
-        Create task for solving hCaptcha in CapMonster
-
-        Args:
-            websiteURL: URL of the page with hCaptcha
-            siteKey: hCaptcha sitekey
-
-        Returns:
-            Task ID or None in case of error
-        """
+    async def get_hcaptcha_task(self, websiteURL: str, siteKey: str, is_invisible: bool = True) -> Optional[int]:
         try:
             ip, port, login, password = await self.parse_proxy()
-
-            json_data = {
-                "clientKey": Settings().capmonster_api_key,
-                "task": {
-                    "type": "HCaptchaTaskProxyless",  # default without proxy
-                    "websiteURL": websiteURL,
-                    "websiteKey": siteKey,
-                }
+    
+            # Базовые параметры задачи
+            task_data = {
+                "type": "HCaptchaTaskProxyless",  # попробуем сначала без прокси
+                "websiteURL": websiteURL,
+                "websiteKey": siteKey,
+                "isInvisible": is_invisible,
+                "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
             }
-
-            # Use proxy if available
+    
+            # Если указан прокси, меняем тип на HCaptchaTask
             if ip and port:
-                json_data["task"]["type"] = "HCaptchaTask"
-                json_data["task"].update({
+                task_data["type"] = "HCaptchaTask"
+                task_data.update({
                     "proxyType": "http",
                     "proxyAddress": ip,
                     "proxyPort": port
                 })
                 if login and password:
-                    json_data["task"].update({
+                    task_data.update({
                         "proxyLogin": login,
                         "proxyPassword": password
                     })
-
+    
+            json_data = {
+                "clientKey": Settings().capmonster_api_key,
+                "task": task_data,
+            }
+    
+            logger.debug(f"CapMonster task payload: {json_data}")
+    
             resp = await self.browser.post(
                 url='https://api.capmonster.cloud/createTask',
                 json=json_data,
             )
-
+    
             if resp.status_code == 200:
                 result = json.loads(resp.text)
                 if result.get('errorId') == 0:
@@ -96,13 +93,13 @@ class CaptchaHandler:
                     logger.error(f"{self.browser.wallet} CapMonster error: {result.get('errorDescription', 'Unknown error')}")
                     return None
             else:
-                logger.error(f"{self.browser.wallet} CapMonster request error: {resp.status_code}")
+                logger.error(f"{self.browser.wallet} CapMonster request error: {resp.status_code}, response: {resp.text}")
                 return None
-
+    
         except Exception as e:
             logger.error(f"{self.browser.wallet} error creating hCaptcha task: {str(e)}")
             return None
-
+        
     async def get_recaptcha_token(self, task_id: int) -> Optional[dict]:
         """
         Get task result from CapMonster
