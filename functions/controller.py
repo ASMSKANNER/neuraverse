@@ -3,7 +3,7 @@ import time
 import json
 import math
 import random
-from collections import Counter
+import re
 
 from loguru import logger
 
@@ -40,6 +40,112 @@ class Controller:
         self.bridge = Bridge(client_sepolia=client_sepolia, client=client, wallet=wallet)
         self.zotto = ZottoSwap(client=client, wallet=wallet)
         self.omnihub = OmnihubNFT(client=client, wallet=wallet)
+
+    @staticmethod
+    def _quest_id(quest: dict) -> str:
+        return str(
+            quest.get("id")
+            or quest.get("taskId")
+            or quest.get("questId")
+            or ""
+        ).strip()
+
+    def _quest_title(self, quest: dict) -> str:
+        return str(
+            quest.get("title")
+            or quest.get("name")
+            or self._quest_id(quest)
+        ).strip()
+
+    @staticmethod
+    def _is_claimable(quest: dict) -> bool:
+        claimable = quest.get("claimable")
+        if isinstance(claimable, bool):
+            return claimable
+
+        status = str(quest.get("status") or "").strip().lower()
+        reward_status = str(quest.get("rewardStatus") or "").strip().lower()
+
+        return status == "claimable" or reward_status == "claimable"
+
+    @staticmethod
+    def _is_completed(quest: dict) -> bool:
+        completed = quest.get("completed")
+        if isinstance(completed, bool):
+            return completed
+
+        status = str(quest.get("status") or "").strip().lower()
+        reward_status = str(quest.get("rewardStatus") or "").strip().lower()
+
+        return (
+            status in {"completed", "claimed"}
+            or reward_status in {"completed", "claimed"}
+        )
+
+    @staticmethod
+    def _normalize_quest_text(value: str) -> str:
+        value = (value or "").lower()
+        value = re.sub(r"[^a-z0-9$]+", " ", value)
+        return re.sub(r"\s+", " ", value).strip()
+
+    def _recognize_supported_action(self, quest: dict) -> str | None:
+        quest_id = self._normalize_quest_text(self._quest_id(quest))
+        title = self._normalize_quest_text(self._quest_title(quest))
+        haystack = f"{quest_id} {title}".strip()
+
+        # Explicitly excluded for now
+        if "zotto volume milestone" in haystack and ("1k" in haystack or "10k" in haystack):
+            return None
+        if "bridge ankr tokens from sepolia to neura" in haystack:
+            return None
+        if "claim faucet" in haystack or "faucet claim" in haystack:
+            return None
+
+        if (
+            "collect all pulses" in haystack
+            or "collect pulses" in haystack
+            or "pulse collect" in haystack
+        ):
+            return "collect_all_pulses"
+
+        if (
+            "visit all map locations" in haystack
+            or "visit all locations" in haystack
+            or "visit all map" in haystack
+        ):
+            return "visit_all_locations"
+
+        if (
+            "complete 1 zotto swap" in haystack
+            or ("zotto" in haystack and "swap" in haystack and "1" in haystack and "1k" not in haystack and "10k" not in haystack)
+        ):
+            return "zotto_swap_once"
+
+        if "follow" in haystack and "twitter" in haystack and "neura" in haystack:
+            return "follow_twitter_neura"
+
+        if "follow" in haystack and "twitter" in haystack and "zotto" in haystack:
+            return "follow_twitter_zotto"
+
+        if (
+            "connect twitter" in haystack
+            or "connect discord" in haystack
+            or "link twitter" in haystack
+            or "link discord" in haystack
+        ):
+            return "connect_socials"
+
+        if "daily login" in haystack:
+            return "daily_login"
+
+        return None
+
+    async def _pause_between_actions(self) -> None:
+        pause = random.randint(
+            self.settings.random_pause_between_actions_min,
+            self.settings.random_pause_between_actions_max,
+        )
+        await asyncio.sleep(pause)
 
     async def build_actions(self) -> list:
         try:
@@ -261,148 +367,136 @@ class Controller:
             logger.error(f"{self.wallet} | Error in connect_socials — {e}")
             return False
 
+    async def execute_single_quest(self, quest: dict) -> bool:
+        action = self._recognize_supported_action(quest)
+        title = self._quest_title(quest)
+
+        try:
+            if action == "daily_login":
+                logger.info(f"{self.wallet} | Quest '{title}' does not require explicit completion call")
+                return True
+
+            if action == "collect_all_pulses":
+                return await self.collect_all_pulses()
+
+            if action == "visit_all_locations":
+                return await self.visit_all_supported_locations()
+
+            if action == "zotto_swap_once":
+                return await self.execute_zotto_swaps(total_swaps=1)
+
+            if action == "follow_twitter_neura":
+                return await self.follow_twitter(account_name="Neura_io")
+
+            if action == "follow_twitter_zotto":
+                return await self.follow_twitter(account_name="zottoHQ")
+
+            if action == "connect_socials":
+                return await self.connect_socials()
+
+            logger.info(f"{self.wallet} | Quest '{title}' is unsupported for explicit completion")
+            return False
+
+        except Exception as e:
+            logger.error(f"{self.wallet} | Error while executing quest '{title}' — {e}")
+            return False
+
     async def complete_quests(self) -> bool:
         logger.info(f"{self.wallet} | Starting quest processing...")
-    
-        def _quest_id(quest: dict) -> str:
-            return str(
-                quest.get("id")
-                or quest.get("taskId")
-                or quest.get("questId")
-                or ""
-            ).strip()
-    
-        def _quest_title(quest: dict) -> str:
-            return str(quest.get("title") or quest.get("name") or _quest_id(quest)).strip()
-    
-        def _is_claimable(quest: dict) -> bool:
-            claimable = quest.get("claimable")
-            if isinstance(claimable, bool):
-                return claimable
-    
-            status = str(quest.get("status") or "").strip().lower()
-            reward_status = str(quest.get("rewardStatus") or "").strip().lower()
-    
-            return status == "claimable" or reward_status == "claimable"
-    
-        def _is_completed(quest: dict) -> bool:
-            completed = quest.get("completed")
-            if isinstance(completed, bool):
-                return completed
-    
-            status = str(quest.get("status") or "").strip().lower()
-            reward_status = str(quest.get("rewardStatus") or "").strip().lower()
-    
-            return (
-                status in {"completed", "claimed"}
-                or reward_status in {"completed", "claimed"}
-            )
-    
+
         try:
-            all_quests = await self.neuraverse.get_all_quests()
+            all_quests = await self.portal.get_all_quests()
         except Exception as e:
             logger.error(f"{self.wallet} | Failed to fetch quests due to network/auth/API error: {e}")
             return False
-    
-        if not all_quests:
+
+        if all_quests is None:
             logger.error(f"{self.wallet} | Failed to fetch quests due to network/auth/API error")
             return False
-    
-        supported_ids = (
-            set(self.supported_quest.keys())
-            if isinstance(self.supported_quest, dict)
-            else set(self.supported_quest)
-        )
-        supported_ids = {str(x).strip() for x in supported_ids if str(x).strip()}
-    
+
         claimable_quests = []
         actionable_not_completed = []
         unsupported_not_completed = []
-    
+
         for quest in all_quests:
-            quest_id = _quest_id(quest)
-            if not quest_id:
+            quest_id = self._quest_id(quest)
+            title = self._quest_title(quest)
+
+            if not quest_id and not title:
                 continue
-    
-            if quest_id not in supported_ids:
-                if not _is_completed(quest):
-                    unsupported_not_completed.append(quest)
-                continue
-    
-            if _is_claimable(quest):
+
+            if self._is_claimable(quest):
                 claimable_quests.append(quest)
-            elif not _is_completed(quest):
+                continue
+
+            if self._is_completed(quest):
+                continue
+
+            action = self._recognize_supported_action(quest)
+            if action:
                 actionable_not_completed.append(quest)
-    
-        claimable_quests.sort(key=lambda q: 1 if _quest_id(q) == "daily_login" else 0)
-        actionable_not_completed.sort(key=lambda q: 1 if _quest_id(q) == "daily_login" else 0)
-    
+            else:
+                unsupported_not_completed.append(quest)
+
+        claimable_quests.sort(key=lambda q: 1 if "daily login" in self._normalize_quest_text(self._quest_title(q)) else 0)
+        actionable_not_completed.sort(key=lambda q: 1 if "daily login" in self._normalize_quest_text(self._quest_title(q)) else 0)
+
         logger.info(
             f"{self.wallet} | Quests overview: "
             f"claimable={len(claimable_quests)}, "
             f"not_completed={len(actionable_not_completed)}, "
             f"total={len(all_quests)}"
         )
-    
+
         claimed = 0
         completed = 0
         claim_failures = 0
         complete_failures = 0
         skipped_unsupported = len(unsupported_not_completed)
-    
-        for quest in claimable_quests:
-            quest_id = _quest_id(quest)
-            title = _quest_title(quest)
-    
+
+        for idx, quest in enumerate(claimable_quests, start=1):
+            quest_id = self._quest_id(quest)
+            title = self._quest_title(quest)
+
             logger.info(f"{self.wallet} | Claiming reward for quest: {title}")
-    
-            ok = await self.neuraverse.claim_quest_reward(
+
+            ok = await self.portal.claim_quest_reward(
                 quest_id=quest_id,
                 title=title,
             )
-    
+
             if ok:
                 claimed += 1
                 logger.success(f"{self.wallet} | Successfully claimed quest: {title}")
             else:
                 claim_failures += 1
                 logger.error(f"{self.wallet} | Failed to claim quest: {title}")
-    
-        for quest in actionable_not_completed:
-            quest_id = _quest_id(quest)
-            title = _quest_title(quest)
-            quest_id_l = quest_id.lower()
-    
+
+            if idx < len(claimable_quests) or actionable_not_completed:
+                await self._pause_between_actions()
+
+        for idx, quest in enumerate(actionable_not_completed, start=1):
+            title = self._quest_title(quest)
+
             logger.info(f"{self.wallet} | Completing quest: {title}")
-    
+
             try:
-                if quest_id_l in {"collect_all_pulses", "collect_pulses"}:
-                    ok = await self.collect_all_pulses()
-    
-                elif quest_id_l in {
-                    "visit_all_map",
-                    "visit_all_locations",
-                    "visit_all_map_locations_in_a_week",
-                }:
-                    ok = await self.visit_all_supported_locations()
-    
-                else:
-                    ok = await self.neuraverse.complete_quest(
-                        quest_id=quest_id,
-                        title=title,
-                    )
-    
+                ok = await self.execute_single_quest(quest)
+
                 if ok:
                     completed += 1
                     logger.success(f"{self.wallet} | Successfully completed quest: {title}")
                 else:
                     complete_failures += 1
                     logger.error(f"{self.wallet} | Failed to complete quest: {title}")
-    
+
             except Exception as e:
                 complete_failures += 1
                 logger.error(f"{self.wallet} | Error while completing quest '{title}': {e}")
-    
+
+            if idx < len(actionable_not_completed):
+                await self._pause_between_actions()
+
         logger.info(
             f"{self.wallet} | Quests summary: "
             f"claimed={claimed}, "
@@ -411,44 +505,8 @@ class Controller:
             f"complete_failures={complete_failures}, "
             f"skipped_unsupported={skipped_unsupported}"
         )
-    
+
         return claim_failures == 0 and complete_failures == 0
-
-        except Exception as e:
-            logger.error(f"{self.wallet} | Error — {e}")
-            return False
-
-    async def execute_single_quest(self, quest: dict) -> bool:
-        try:
-            quest_id = quest.get("id")
-            quest_name = quest.get("name")
-
-            if quest_id in {"daily_login", "DAILY_LOGIN"}:
-                return True
-
-            elif quest_id in {"collect_all_pulses", "COLLECT_PULSES"}:
-                return await self.collect_all_pulses()
-
-            elif quest_id in {"visit_all_map", "VISIT_ALL_LOCATIONS"}:
-                return await self.visit_all_supported_locations()
-
-            elif quest_id == "twitter_follow_neura_official":
-                return await self.follow_twitter(account_name="Neura_io")
-
-            elif quest_id == "twitter_follow_zotto_official":
-                return await self.follow_twitter(account_name="zottoHQ")
-
-            elif quest_id == "BRIDGE_ANKR":
-                return await self.execute_auto_bridge(total_bridge=1, bridge_all_to_neura=True)
-
-            elif quest_id in {"zotto_swap_1k", "zotto_swap_10k"}:
-                return True
-
-            raise TypeError(f"Quest {quest_name} not supported yet (id={quest_id})")
-
-        except Exception as e:
-            logger.error(f"{self.wallet} | Error — {e}")
-            return False
 
     async def visit_all_supported_locations(self) -> bool:
         try:
