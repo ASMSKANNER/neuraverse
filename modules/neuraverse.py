@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlparse
 from loguru import logger
 
 from data.constants import DEFAULT_HEADERS
+from data.settings import Settings
 from libs.eth_async.client import Client
 from modules.privy_authentication import PrivyAuth
 from utils.browser import Browser
@@ -38,6 +39,24 @@ class NeuraVerse:
     @property
     def headers(self) -> dict:
         return {**DEFAULT_HEADERS, "authorization": f"Bearer {self.wallet.identity_token}"}
+
+    @property
+    def cookies(self) -> dict:
+        return self.privy.cookies
+
+    async def random_pause(self) -> None:
+        settings = Settings()
+        pause_min = settings.random_pause_between_actions_min
+        pause_max = settings.random_pause_between_actions_max
+
+        if pause_min is None:
+            pause_min = 5
+        if pause_max is None:
+            pause_max = 10
+        if pause_max < pause_min:
+            pause_max = pause_min
+
+        await asyncio.sleep(asyncio.get_event_loop().time() * 0 + __import__("random").randint(pause_min, pause_max))
 
     async def get_account_info(self) -> dict:
         if not self.privy.authentication:
@@ -135,30 +154,30 @@ class NeuraVerse:
             return None
 
     async def claim_quest_reward(self, quest_id: str, title: str) -> bool:
+        if not self.privy.authentication:
+            auth_ok = await self.privy.privy_authorize()
+            if not auth_ok:
+                logger.error(f"{self.wallet} | Privy authorization failed before claim_quest_reward")
+                return False
+
         url = f"{self.BASE_URL}/tasks/{quest_id}/claim"
-    
-        await self.random_pause()
-    
+
         try:
-            headers = {
-                **self.headers,
-                "authorization": f"Bearer {self.wallet.identity_token}",
-            }
-    
-            response = await self.session.post(
-                url=url,
-                headers=headers,
-                cookies=self.cookies,
-                timeout=30,
-            )
-    
+            async with NeuraVerse._claim_semaphore:
+                response = await self.session.post(
+                    url=url,
+                    headers=self.headers,
+                    cookies=self.cookies,
+                    timeout=30,
+                )
+
             if response.status_code != 200:
                 logger.error(
                     f"{self.wallet} | Failed to claim quest '{title}' "
                     f"({response.status_code}): {response.text}"
                 )
                 return False
-    
+
             try:
                 result = response.json()
             except Exception:
@@ -166,29 +185,29 @@ class NeuraVerse:
                     f"{self.wallet} | Non-JSON claim response for '{title}': {response.text}"
                 )
                 return False
-    
+
             status = result.get("status")
             ok_value = result.get("ok")
-    
+
             status_normalized = str(status).strip().lower() in {
                 "claimed",
                 "ok",
                 "success",
             }
             ok_normalized = ok_value is True or str(ok_value).strip().lower() == "true"
-    
+
             if not (status_normalized or ok_normalized):
                 logger.error(
                     f"{self.wallet} | Invalid quest claim response for '{title}': {response.text}"
                 )
                 return False
-    
+
             return True
-    
+
         except Exception as e:
             logger.error(f"{self.wallet} | Error claiming quest '{title}': {e}")
             return False
-            
+
     async def collect_single_pulse(self, pulse_id: str) -> bool:
         if not self.privy.authentication:
             auth_ok = await self.privy.privy_authorize()
