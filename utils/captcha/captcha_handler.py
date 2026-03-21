@@ -289,7 +289,8 @@ class CaptchaHandler:
             status = data.get("status")
             if status == "closed":
                 solution = data.get("solution", {})
-                logger.debug(f"{self.wallet} | Full solution from Astrum: {solution}")
+                # Логируем ВЕСЬ ответ для отладки
+                logger.info(f"{self.wallet} | Astrum solution received: {solution}")
                 token = solution.get("token") or solution.get("gRecaptchaResponse")
                 if not token:
                     raise CaptchaError(
@@ -353,7 +354,7 @@ class CaptchaHandler:
                 token = solution.get("token") or solution.get("gRecaptchaResponse")
                 if token:
                     logger.success(f"{self.wallet} | hCaptcha solved successfully")
-                    logger.debug(f"{self.wallet} | Token: {token[:50]}...")  # показываем начало токена
+                    logger.info(f"{self.wallet} | Token (first 80 chars): {token[:80]}...")
                     return token
                 else:
                     logger.warning(f"{self.wallet} | Solution missing token: {solution}")
