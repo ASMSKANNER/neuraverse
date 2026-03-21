@@ -57,7 +57,7 @@ class ProxyConfig:
 
 class CaptchaHandler:
     """
-    Решение hCaptcha (тип nn) через Astrum Solver.
+    Решение hCaptcha через CapMonster API.
     """
 
     CREATE_TASK_TIMEOUT = 20
@@ -195,26 +195,28 @@ class CaptchaHandler:
         return data
 
     def _validate_api_key_present(self) -> None:
-        api_key = getattr(self.settings, "astrum_api_key", None)
+        api_key = getattr(self.settings, "capmonster_api_key", None)
         if not api_key:
             raise CaptchaError(
                 kind=CaptchaErrorKind.CONFIG,
-                message="astrum_api_key is missing in settings",
+                message="capmonster_api_key is missing in settings",
             )
 
     def _build_hcaptcha_task_payload(
         self,
         website_url: str,
         site_key: str,
-        rqdata: Optional[str] = None,
         is_invisible: bool = True,
+        rqdata: Optional[str] = None,
     ) -> dict[str, Any]:
         self._validate_api_key_present()
 
+        # Для CapMonster используем тип HCaptchaTaskProxyless
+        task_type = "HCaptchaTaskProxyless"
         task_data: dict[str, Any] = {
-            "type": "nn",
+            "type": task_type,
             "websiteURL": website_url,
-            "siteKey": site_key,
+            "websiteKey": site_key,
             "isInvisible": is_invisible,
             "userAgent": self.user_agent,
         }
@@ -224,10 +226,21 @@ class CaptchaHandler:
 
         proxy = self.parse_proxy()
         if proxy:
-            task_data["proxyURL"] = proxy.url
+            # Если есть прокси, меняем тип на HCaptchaTask
+            task_data["type"] = "HCaptchaTask"
+            task_data.update({
+                "proxyType": proxy.scheme,
+                "proxyAddress": proxy.host,
+                "proxyPort": proxy.port,
+            })
+            if proxy.login and proxy.password:
+                task_data.update({
+                    "proxyLogin": proxy.login,
+                    "proxyPassword": proxy.password,
+                })
 
         return {
-            "clientKey": self.settings.astrum_api_key,
+            "clientKey": self.settings.capmonster_api_key,
             "task": task_data,
         }
 
@@ -235,18 +248,18 @@ class CaptchaHandler:
         self,
         website_url: str,
         site_key: str,
-        rqdata: Optional[str] = None,
         is_invisible: bool = True,
-    ) -> str:
+        rqdata: Optional[str] = None,
+    ) -> int:
         payload = self._build_hcaptcha_task_payload(
             website_url=website_url,
             site_key=site_key,
-            rqdata=rqdata,
             is_invisible=is_invisible,
+            rqdata=rqdata,
         )
 
         data = await self._post_json(
-            url="https://solver.astrum.foundation/api/createTask",
+            url="https://api.capmonster.cloud/createTask",
             json_payload=payload,
             timeout_seconds=self.CREATE_TASK_TIMEOUT,
             operation_name="createTask",
@@ -255,7 +268,7 @@ class CaptchaHandler:
         if data.get("errorId") != 0:
             raise CaptchaError(
                 kind=CaptchaErrorKind.PROVIDER,
-                message="Astrum error creating task",
+                message="CapMonster error creating task",
                 details=data.get("errorDescription", "Unknown error"),
             )
 
@@ -263,49 +276,45 @@ class CaptchaHandler:
         if not task_id:
             raise CaptchaError(
                 kind=CaptchaErrorKind.RESPONSE,
-                message="Astrum response missing taskId",
+                message="CapMonster response missing taskId",
             )
 
-        logger.info(f"{self.wallet} | Created Astrum nn task: {task_id}")
+        logger.info(f"{self.wallet} | Created CapMonster hCaptcha task: {task_id}")
         return task_id
 
-    async def _get_task_result(self, task_id: str) -> dict[str, Any]:
+    async def _get_task_result(self, task_id: int) -> dict[str, Any]:
         payload = {
-            "clientKey": self.settings.astrum_api_key,
-            "task": {
-                "taskId": task_id,
-                "type": "nn",
-            },
+            "clientKey": self.settings.capmonster_api_key,
+            "taskId": task_id,
         }
 
         for attempt in range(self.MAX_POLL_ATTEMPTS):
             data = await self._post_json(
-                url="https://solver.astrum.foundation/api/getTaskResult",
+                url="https://api.capmonster.cloud/getTaskResult",
                 json_payload=payload,
                 timeout_seconds=self.POLL_TIMEOUT,
                 operation_name=f"getTaskResult (attempt {attempt+1})",
             )
 
             status = data.get("status")
-            if status == "closed":
+            if status == "ready":
                 solution = data.get("solution", {})
-                # Логируем ВЕСЬ ответ для отладки
-                logger.info(f"{self.wallet} | Astrum solution received: {solution}")
-                token = solution.get("token") or solution.get("gRecaptchaResponse")
+                logger.info(f"{self.wallet} | CapMonster solution received: {solution}")
+                token = solution.get("gRecaptchaResponse") or solution.get("token")
                 if not token:
                     raise CaptchaError(
                         kind=CaptchaErrorKind.RESPONSE,
-                        message="Astrum returned solution without token",
+                        message="CapMonster returned solution without token",
                         details=str(solution),
                     )
                 return solution
-            elif status in ("processing", "in_progress", "opened"):
+            elif status == "processing":
                 await asyncio.sleep(self.POLL_INTERVAL_SECONDS)
                 continue
             else:
                 raise CaptchaError(
                     kind=CaptchaErrorKind.PROVIDER,
-                    message=f"Astrum returned unknown status: {status}",
+                    message=f"CapMonster returned unknown status: {status}",
                     details=data.get("errorDescription"),
                 )
 
@@ -322,15 +331,15 @@ class CaptchaHandler:
         rqdata: Optional[str] = None,
     ) -> str:
         """
-        Решает hCaptcha через Astrum Solver (тип nn) и возвращает токен.
+        Решает hCaptcha через CapMonster и возвращает токен.
         """
         self._validate_api_key_present()
         try:
             _ = self._build_hcaptcha_task_payload(
                 website_url=websiteURL,
                 site_key=siteKey,
-                rqdata=rqdata,
                 is_invisible=is_invisible,
+                rqdata=rqdata,
             )
         except CaptchaError:
             raise
@@ -347,11 +356,11 @@ class CaptchaHandler:
                 task_id = await self._create_hcaptcha_task(
                     website_url=websiteURL,
                     site_key=siteKey,
-                    rqdata=rqdata,
                     is_invisible=is_invisible,
+                    rqdata=rqdata,
                 )
                 solution = await self._get_task_result(task_id)
-                token = solution.get("token") or solution.get("gRecaptchaResponse")
+                token = solution.get("gRecaptchaResponse") or solution.get("token")
                 if token:
                     logger.success(f"{self.wallet} | hCaptcha solved successfully")
                     logger.info(f"{self.wallet} | Token (first 80 chars): {token[:80]}...")
