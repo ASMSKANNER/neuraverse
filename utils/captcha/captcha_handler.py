@@ -57,7 +57,7 @@ class ProxyConfig:
 
 class CaptchaHandler:
     """
-    Решение hCaptcha через Astrum Solver с безопасной обработкой.
+    Решение hCaptcha (тип nn) через Astrum Solver.
     """
 
     CREATE_TASK_TIMEOUT = 20
@@ -72,7 +72,6 @@ class CaptchaHandler:
 
     @property
     def user_agent(self) -> str:
-        # Единый источник UA (можно вынести в settings)
         return getattr(self.settings, "default_user_agent", None) or (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -207,41 +206,37 @@ class CaptchaHandler:
         self,
         website_url: str,
         site_key: str,
-        is_invisible: bool = True,   # параметр оставляем для совместимости, но в payload не включаем
         rqdata: Optional[str] = None,
     ) -> dict[str, Any]:
         self._validate_api_key_present()
-    
+
         task_data: dict[str, Any] = {
-            "type": "nn",                     # изменено с "hcaptcha"
+            "type": "nn",
             "websiteURL": website_url,
-            "websiteKey": site_key,           # возможно, нужно siteKey — проверьте
+            "siteKey": site_key,          # ключевое изменение: siteKey
         }
-    
+
         if rqdata:
             task_data["rqdata"] = rqdata
-    
+
         proxy = self.parse_proxy()
         if proxy:
             task_data["proxyURL"] = proxy.url
-    
+
         return {
             "clientKey": self.settings.astrum_api_key,
             "task": task_data,
         }
-    
+
     async def _create_hcaptcha_task(
         self,
         website_url: str,
         site_key: str,
-        is_invisible: bool = True,
         rqdata: Optional[str] = None,
     ) -> str:
-        """Создаёт задачу в Astrum Solver и возвращает taskId."""
         payload = self._build_hcaptcha_task_payload(
             website_url=website_url,
             site_key=site_key,
-            is_invisible=is_invisible,
             rqdata=rqdata,
         )
 
@@ -266,16 +261,15 @@ class CaptchaHandler:
                 message="Astrum response missing taskId",
             )
 
-        logger.info(f"{self.wallet} | Created hCaptcha task: {task_id}")
+        logger.info(f"{self.wallet} | Created Astrum nn task: {task_id}")
         return task_id
 
     async def _get_task_result(self, task_id: str) -> dict[str, Any]:
-        """Опрашивает результат задачи."""
         payload = {
             "clientKey": self.settings.astrum_api_key,
             "task": {
                 "taskId": task_id,
-                "type": "nn",                 # изменено с "hcaptcha"
+                "type": "nn",
             },
         }
 
@@ -317,19 +311,18 @@ class CaptchaHandler:
         self,
         websiteURL: str,
         siteKey: str,
-        is_invisible: bool = True,
+        is_invisible: bool = True,       # оставлен для совместимости, но не используется
         rqdata: Optional[str] = None,
     ) -> str:
         """
-        Решает hCaptcha через Astrum Solver и возвращает токен.
+        Решает hCaptcha через Astrum Solver (тип nn) и возвращает токен.
         """
         self._validate_api_key_present()
-        # Проверяем возможность построить payload (например, валидность прокси)
+        # Небольшая проверка перед циклом
         try:
             _ = self._build_hcaptcha_task_payload(
                 website_url=websiteURL,
                 site_key=siteKey,
-                is_invisible=is_invisible,
                 rqdata=rqdata,
             )
         except CaptchaError:
@@ -347,7 +340,6 @@ class CaptchaHandler:
                 task_id = await self._create_hcaptcha_task(
                     website_url=websiteURL,
                     site_key=siteKey,
-                    is_invisible=is_invisible,
                     rqdata=rqdata,
                 )
                 solution = await self._get_task_result(task_id)
