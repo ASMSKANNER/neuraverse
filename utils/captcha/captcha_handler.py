@@ -207,6 +207,7 @@ class CaptchaHandler:
         website_url: str,
         site_key: str,
         rqdata: Optional[str] = None,
+        is_invisible: bool = True,
     ) -> dict[str, Any]:
         self._validate_api_key_present()
 
@@ -214,6 +215,8 @@ class CaptchaHandler:
             "type": "nn",
             "websiteURL": website_url,
             "siteKey": site_key,
+            "isInvisible": is_invisible,
+            "userAgent": self.user_agent,
         }
 
         if rqdata:
@@ -233,11 +236,13 @@ class CaptchaHandler:
         website_url: str,
         site_key: str,
         rqdata: Optional[str] = None,
+        is_invisible: bool = True,
     ) -> str:
         payload = self._build_hcaptcha_task_payload(
             website_url=website_url,
             site_key=site_key,
             rqdata=rqdata,
+            is_invisible=is_invisible,
         )
 
         data = await self._post_json(
@@ -284,7 +289,8 @@ class CaptchaHandler:
             status = data.get("status")
             if status == "closed":
                 solution = data.get("solution", {})
-                token = solution.get("token")
+                logger.debug(f"{self.wallet} | Full solution from Astrum: {solution}")
+                token = solution.get("token") or solution.get("gRecaptchaResponse")
                 if not token:
                     raise CaptchaError(
                         kind=CaptchaErrorKind.RESPONSE,
@@ -323,6 +329,7 @@ class CaptchaHandler:
                 website_url=websiteURL,
                 site_key=siteKey,
                 rqdata=rqdata,
+                is_invisible=is_invisible,
             )
         except CaptchaError:
             raise
@@ -340,11 +347,13 @@ class CaptchaHandler:
                     website_url=websiteURL,
                     site_key=siteKey,
                     rqdata=rqdata,
+                    is_invisible=is_invisible,
                 )
                 solution = await self._get_task_result(task_id)
-                token = solution.get("token")
+                token = solution.get("token") or solution.get("gRecaptchaResponse")
                 if token:
                     logger.success(f"{self.wallet} | hCaptcha solved successfully")
+                    logger.debug(f"{self.wallet} | Token: {token[:50]}...")  # показываем начало токена
                     return token
                 else:
                     logger.warning(f"{self.wallet} | Solution missing token: {solution}")
