@@ -255,7 +255,8 @@ class PrivyAuth:
             if not captcha_token:
                 raise ValueError("Captcha token missing")
     
-            logger.debug(f"{self.wallet} | Received captcha token (length: {len(captcha_token)})")
+            logger.info(f"{self.wallet} | Captcha token obtained, length: {len(captcha_token)}")
+            logger.debug(f"{self.wallet} | Full token: {captcha_token}")
     
         except Exception as e:
             logger.error(f"{self.wallet} | Failed to obtain captcha token — {e}")
@@ -265,6 +266,8 @@ class PrivyAuth:
             "address": self.wallet.address,
             "token": captcha_token,
         }
+    
+        logger.debug(f"{self.wallet} | Sending to /siwe/init: address={self.wallet.address}, token_length={len(captcha_token)}")
     
         try:
             response = await self.session.post(
@@ -286,7 +289,6 @@ class PrivyAuth:
         except Exception as e:
             logger.error(f"{self.wallet} | get_nonce(): request/parse error — {e}")
             raise
-
     async def send_analytics_events(self, is_new_user: bool) -> bool:
         try:
             cookies = {
