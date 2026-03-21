@@ -207,31 +207,29 @@ class CaptchaHandler:
         self,
         website_url: str,
         site_key: str,
-        is_invisible: bool = True,
+        is_invisible: bool = True,   # параметр оставляем для совместимости, но в payload не включаем
         rqdata: Optional[str] = None,
     ) -> dict[str, Any]:
         self._validate_api_key_present()
-
+    
         task_data: dict[str, Any] = {
-            "type": "hcaptcha",
+            "type": "nn",                     # изменено с "hcaptcha"
             "websiteURL": website_url,
-            "websiteKey": site_key,
-            "isInvisible": is_invisible,
-            "userAgent": self.user_agent,
+            "websiteKey": site_key,           # возможно, нужно siteKey — проверьте
         }
-
+    
         if rqdata:
             task_data["rqdata"] = rqdata
-
+    
         proxy = self.parse_proxy()
         if proxy:
             task_data["proxyURL"] = proxy.url
-
+    
         return {
             "clientKey": self.settings.astrum_api_key,
             "task": task_data,
         }
-
+    
     async def _create_hcaptcha_task(
         self,
         website_url: str,
