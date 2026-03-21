@@ -65,6 +65,13 @@ class CaptchaHandler:
     POLL_INTERVAL_SECONDS = 2
     MAX_POLL_ATTEMPTS = 30
 
+    # Доступные типы задач для hCaptcha:
+    # - HCaptchaTask (с прокси)
+    # - HCaptchaTaskProxyless (без прокси)
+    # - HCaptchaTurboTask (с прокси, быстрый)
+    # - HCaptchaTurboTaskProxyless (без прокси, быстрый)
+    DEFAULT_TASK_TYPE = "HCaptchaTurboTaskProxyless"  # можно изменить в настройках
+
     def __init__(self, wallet: Wallet):
         self.wallet = wallet
         self.browser = Browser(wallet=wallet)
@@ -208,11 +215,18 @@ class CaptchaHandler:
         site_key: str,
         is_invisible: bool = True,
         rqdata: Optional[str] = None,
+        task_type: Optional[str] = None,
     ) -> dict[str, Any]:
         self._validate_api_key_present()
 
-        # Для CapMonster используем тип HCaptchaTaskProxyless
-        task_type = "HCaptchaTaskProxyless"
+        # Если тип не указан, берём из настроек или используем стандартный
+        if task_type is None:
+            task_type = getattr(self.settings, "hcaptcha_task_type", self.DEFAULT_TASK_TYPE)
+
+        # Определяем, нужны ли прокси в зависимости от типа
+        use_proxy = not task_type.endswith("Proxyless")
+        proxy = self.parse_proxy() if use_proxy else None
+
         task_data: dict[str, Any] = {
             "type": task_type,
             "websiteURL": website_url,
@@ -224,10 +238,8 @@ class CaptchaHandler:
         if rqdata:
             task_data["rqdata"] = rqdata
 
-        proxy = self.parse_proxy()
-        if proxy:
-            # Если есть прокси, меняем тип на HCaptchaTask
-            task_data["type"] = "HCaptchaTask"
+        # Добавляем прокси только если тип задачи не Proxyless
+        if proxy and use_proxy:
             task_data.update({
                 "proxyType": proxy.scheme,
                 "proxyAddress": proxy.host,
@@ -250,12 +262,14 @@ class CaptchaHandler:
         site_key: str,
         is_invisible: bool = True,
         rqdata: Optional[str] = None,
+        task_type: Optional[str] = None,
     ) -> int:
         payload = self._build_hcaptcha_task_payload(
             website_url=website_url,
             site_key=site_key,
             is_invisible=is_invisible,
             rqdata=rqdata,
+            task_type=task_type,
         )
 
         data = await self._post_json(
@@ -329,52 +343,52 @@ class CaptchaHandler:
         siteKey: str,
         is_invisible: bool = True,
         rqdata: Optional[str] = None,
+        task_type: Optional[str] = None,
     ) -> str:
         """
         Решает hCaptcha через CapMonster и возвращает токен.
+        Можно указать task_type: HCaptchaTask, HCaptchaTaskProxyless,
+        HCaptchaTurboTask, HCaptchaTurboTaskProxyless.
         """
         self._validate_api_key_present()
-        try:
-            _ = self._build_hcaptcha_task_payload(
-                website_url=websiteURL,
-                site_key=siteKey,
-                is_invisible=is_invisible,
-                rqdata=rqdata,
-            )
-        except CaptchaError:
-            raise
-        except Exception as e:
-            raise CaptchaError(
-                kind=CaptchaErrorKind.CONFIG,
-                message="Failed to build hCaptcha request",
-                details=str(e),
-            ) from e
 
-        max_retries = 10
-        for attempt in range(1, max_retries + 1):
-            try:
-                task_id = await self._create_hcaptcha_task(
-                    website_url=websiteURL,
-                    site_key=siteKey,
-                    is_invisible=is_invisible,
-                    rqdata=rqdata,
-                )
-                solution = await self._get_task_result(task_id)
-                token = solution.get("gRecaptchaResponse") or solution.get("token")
-                if token:
-                    logger.success(f"{self.wallet} | hCaptcha solved successfully")
-                    logger.info(f"{self.wallet} | Token (first 80 chars): {token[:80]}...")
-                    return token
-                else:
-                    logger.warning(f"{self.wallet} | Solution missing token: {solution}")
-            except CaptchaError as e:
-                logger.warning(f"{self.wallet} | Attempt {attempt}/{max_retries} failed: {e}")
-            except Exception as e:
-                logger.warning(f"{self.wallet} | Attempt {attempt}/{max_retries} unexpected error: {e}")
+        # Список типов для проб (если один не работает, попробуем другой)
+        task_types_to_try = [task_type] if task_type else [
+            "HCaptchaTurboTaskProxyless",
+            "HCaptchaTurboTask",
+            "HCaptchaTaskProxyless",
+            "HCaptchaTask",
+        ]
+
+        for try_type in task_types_to_try:
+            logger.info(f"{self.wallet} | Trying task type: {try_type}")
+            for attempt in range(1, 4):  # 3 попытки на каждый тип
+                try:
+                    task_id = await self._create_hcaptcha_task(
+                        website_url=websiteURL,
+                        site_key=siteKey,
+                        is_invisible=is_invisible,
+                        rqdata=rqdata,
+                        task_type=try_type,
+                    )
+                    solution = await self._get_task_result(task_id)
+                    token = solution.get("gRecaptchaResponse") or solution.get("token")
+                    if token:
+                        logger.success(f"{self.wallet} | hCaptcha solved successfully with {try_type}")
+                        logger.info(f"{self.wallet} | Token (first 80 chars): {token[:80]}...")
+                        return token
+                    else:
+                        logger.warning(f"{self.wallet} | Solution missing token: {solution}")
+                except CaptchaError as e:
+                    logger.warning(f"{self.wallet} | {try_type} attempt {attempt} failed: {e}")
+                    await asyncio.sleep(2)
+                except Exception as e:
+                    logger.warning(f"{self.wallet} | {try_type} attempt {attempt} unexpected error: {e}")
+                    await asyncio.sleep(2)
 
             await asyncio.sleep(3)
 
         raise CaptchaError(
             kind=CaptchaErrorKind.PROVIDER,
-            message=f"All {max_retries} attempts to solve hCaptcha failed",
+            message="All task types and attempts to solve hCaptcha failed",
         )
