@@ -57,20 +57,13 @@ class ProxyConfig:
 
 class CaptchaHandler:
     """
-    Решение hCaptcha через CapMonster API.
+    Решение hCaptcha (тип nn) через Astrum Solver.
     """
 
     CREATE_TASK_TIMEOUT = 20
     POLL_TIMEOUT = 20
     POLL_INTERVAL_SECONDS = 2
     MAX_POLL_ATTEMPTS = 30
-
-    # Доступные типы задач для hCaptcha:
-    # - HCaptchaTask (с прокси)
-    # - HCaptchaTaskProxyless (без прокси)
-    # - HCaptchaTurboTask (с прокси, быстрый)
-    # - HCaptchaTurboTaskProxyless (без прокси, быстрый)
-    DEFAULT_TASK_TYPE = "HCaptchaTurboTaskProxyless"  # можно изменить в настройках
 
     def __init__(self, wallet: Wallet):
         self.wallet = wallet
@@ -202,35 +195,26 @@ class CaptchaHandler:
         return data
 
     def _validate_api_key_present(self) -> None:
-        api_key = getattr(self.settings, "capmonster_api_key", None)
+        api_key = getattr(self.settings, "astrum_api_key", None)
         if not api_key:
             raise CaptchaError(
                 kind=CaptchaErrorKind.CONFIG,
-                message="capmonster_api_key is missing in settings",
+                message="astrum_api_key is missing in settings",
             )
 
     def _build_hcaptcha_task_payload(
         self,
         website_url: str,
         site_key: str,
-        is_invisible: bool = True,
         rqdata: Optional[str] = None,
-        task_type: Optional[str] = None,
+        is_invisible: bool = True,
     ) -> dict[str, Any]:
         self._validate_api_key_present()
 
-        # Если тип не указан, берём из настроек или используем стандартный
-        if task_type is None:
-            task_type = getattr(self.settings, "hcaptcha_task_type", self.DEFAULT_TASK_TYPE)
-
-        # Определяем, нужны ли прокси в зависимости от типа
-        use_proxy = not task_type.endswith("Proxyless")
-        proxy = self.parse_proxy() if use_proxy else None
-
         task_data: dict[str, Any] = {
-            "type": task_type,
+            "type": "nn",
             "websiteURL": website_url,
-            "websiteKey": site_key,
+            "siteKey": site_key,
             "isInvisible": is_invisible,
             "userAgent": self.user_agent,
         }
@@ -238,21 +222,12 @@ class CaptchaHandler:
         if rqdata:
             task_data["rqdata"] = rqdata
 
-        # Добавляем прокси только если тип задачи не Proxyless
-        if proxy and use_proxy:
-            task_data.update({
-                "proxyType": proxy.scheme,
-                "proxyAddress": proxy.host,
-                "proxyPort": proxy.port,
-            })
-            if proxy.login and proxy.password:
-                task_data.update({
-                    "proxyLogin": proxy.login,
-                    "proxyPassword": proxy.password,
-                })
+        proxy = self.parse_proxy()
+        if proxy:
+            task_data["proxyURL"] = proxy.url
 
         return {
-            "clientKey": self.settings.capmonster_api_key,
+            "clientKey": self.settings.astrum_api_key,
             "task": task_data,
         }
 
@@ -260,20 +235,18 @@ class CaptchaHandler:
         self,
         website_url: str,
         site_key: str,
-        is_invisible: bool = True,
         rqdata: Optional[str] = None,
-        task_type: Optional[str] = None,
-    ) -> int:
+        is_invisible: bool = True,
+    ) -> str:
         payload = self._build_hcaptcha_task_payload(
             website_url=website_url,
             site_key=site_key,
-            is_invisible=is_invisible,
             rqdata=rqdata,
-            task_type=task_type,
+            is_invisible=is_invisible,
         )
 
         data = await self._post_json(
-            url="https://api.capmonster.cloud/createTask",
+            url="https://solver.astrum.foundation/api/createTask",
             json_payload=payload,
             timeout_seconds=self.CREATE_TASK_TIMEOUT,
             operation_name="createTask",
@@ -282,7 +255,7 @@ class CaptchaHandler:
         if data.get("errorId") != 0:
             raise CaptchaError(
                 kind=CaptchaErrorKind.PROVIDER,
-                message="CapMonster error creating task",
+                message="Astrum error creating task",
                 details=data.get("errorDescription", "Unknown error"),
             )
 
@@ -290,45 +263,49 @@ class CaptchaHandler:
         if not task_id:
             raise CaptchaError(
                 kind=CaptchaErrorKind.RESPONSE,
-                message="CapMonster response missing taskId",
+                message="Astrum response missing taskId",
             )
 
-        logger.info(f"{self.wallet} | Created CapMonster hCaptcha task: {task_id}")
+        logger.info(f"{self.wallet} | Created Astrum nn task: {task_id}")
         return task_id
 
-    async def _get_task_result(self, task_id: int) -> dict[str, Any]:
+    async def _get_task_result(self, task_id: str) -> dict[str, Any]:
         payload = {
-            "clientKey": self.settings.capmonster_api_key,
-            "taskId": task_id,
+            "clientKey": self.settings.astrum_api_key,
+            "task": {
+                "taskId": task_id,
+                "type": "nn",
+            },
         }
 
         for attempt in range(self.MAX_POLL_ATTEMPTS):
             data = await self._post_json(
-                url="https://api.capmonster.cloud/getTaskResult",
+                url="https://solver.astrum.foundation/api/getTaskResult",
                 json_payload=payload,
                 timeout_seconds=self.POLL_TIMEOUT,
                 operation_name=f"getTaskResult (attempt {attempt+1})",
             )
 
             status = data.get("status")
-            if status == "ready":
+            if status == "closed":
                 solution = data.get("solution", {})
-                logger.info(f"{self.wallet} | CapMonster solution received: {solution}")
-                token = solution.get("gRecaptchaResponse") or solution.get("token")
+                # Логируем ВЕСЬ ответ для отладки
+                logger.info(f"{self.wallet} | Astrum solution received: {solution}")
+                token = solution.get("token") or solution.get("gRecaptchaResponse")
                 if not token:
                     raise CaptchaError(
                         kind=CaptchaErrorKind.RESPONSE,
-                        message="CapMonster returned solution without token",
+                        message="Astrum returned solution without token",
                         details=str(solution),
                     )
                 return solution
-            elif status == "processing":
+            elif status in ("processing", "in_progress", "opened"):
                 await asyncio.sleep(self.POLL_INTERVAL_SECONDS)
                 continue
             else:
                 raise CaptchaError(
                     kind=CaptchaErrorKind.PROVIDER,
-                    message=f"CapMonster returned unknown status: {status}",
+                    message=f"Astrum returned unknown status: {status}",
                     details=data.get("errorDescription"),
                 )
 
@@ -343,52 +320,52 @@ class CaptchaHandler:
         siteKey: str,
         is_invisible: bool = True,
         rqdata: Optional[str] = None,
-        task_type: Optional[str] = None,
     ) -> str:
         """
-        Решает hCaptcha через CapMonster и возвращает токен.
-        Можно указать task_type: HCaptchaTask, HCaptchaTaskProxyless,
-        HCaptchaTurboTask, HCaptchaTurboTaskProxyless.
+        Решает hCaptcha через Astrum Solver (тип nn) и возвращает токен.
         """
         self._validate_api_key_present()
+        try:
+            _ = self._build_hcaptcha_task_payload(
+                website_url=websiteURL,
+                site_key=siteKey,
+                rqdata=rqdata,
+                is_invisible=is_invisible,
+            )
+        except CaptchaError:
+            raise
+        except Exception as e:
+            raise CaptchaError(
+                kind=CaptchaErrorKind.CONFIG,
+                message="Failed to build hCaptcha request",
+                details=str(e),
+            ) from e
 
-        # Список типов для проб (если один не работает, попробуем другой)
-        task_types_to_try = [task_type] if task_type else [
-            "HCaptchaTurboTaskProxyless",
-            "HCaptchaTurboTask",
-            "HCaptchaTaskProxyless",
-            "HCaptchaTask",
-        ]
-
-        for try_type in task_types_to_try:
-            logger.info(f"{self.wallet} | Trying task type: {try_type}")
-            for attempt in range(1, 4):  # 3 попытки на каждый тип
-                try:
-                    task_id = await self._create_hcaptcha_task(
-                        website_url=websiteURL,
-                        site_key=siteKey,
-                        is_invisible=is_invisible,
-                        rqdata=rqdata,
-                        task_type=try_type,
-                    )
-                    solution = await self._get_task_result(task_id)
-                    token = solution.get("gRecaptchaResponse") or solution.get("token")
-                    if token:
-                        logger.success(f"{self.wallet} | hCaptcha solved successfully with {try_type}")
-                        logger.info(f"{self.wallet} | Token (first 80 chars): {token[:80]}...")
-                        return token
-                    else:
-                        logger.warning(f"{self.wallet} | Solution missing token: {solution}")
-                except CaptchaError as e:
-                    logger.warning(f"{self.wallet} | {try_type} attempt {attempt} failed: {e}")
-                    await asyncio.sleep(2)
-                except Exception as e:
-                    logger.warning(f"{self.wallet} | {try_type} attempt {attempt} unexpected error: {e}")
-                    await asyncio.sleep(2)
+        max_retries = 10
+        for attempt in range(1, max_retries + 1):
+            try:
+                task_id = await self._create_hcaptcha_task(
+                    website_url=websiteURL,
+                    site_key=siteKey,
+                    rqdata=rqdata,
+                    is_invisible=is_invisible,
+                )
+                solution = await self._get_task_result(task_id)
+                token = solution.get("token") or solution.get("gRecaptchaResponse")
+                if token:
+                    logger.success(f"{self.wallet} | hCaptcha solved successfully")
+                    logger.info(f"{self.wallet} | Token (first 80 chars): {token[:80]}...")
+                    return token
+                else:
+                    logger.warning(f"{self.wallet} | Solution missing token: {solution}")
+            except CaptchaError as e:
+                logger.warning(f"{self.wallet} | Attempt {attempt}/{max_retries} failed: {e}")
+            except Exception as e:
+                logger.warning(f"{self.wallet} | Attempt {attempt}/{max_retries} unexpected error: {e}")
 
             await asyncio.sleep(3)
 
         raise CaptchaError(
             kind=CaptchaErrorKind.PROVIDER,
-            message="All task types and attempts to solve hCaptcha failed",
+            message=f"All {max_retries} attempts to solve hCaptcha failed",
         )
