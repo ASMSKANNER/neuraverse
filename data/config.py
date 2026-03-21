@@ -27,4 +27,3 @@ LOCK = asyncio.Lock()
 
 LOGS_DIR = os.path.join(FILES_DIR, "logs")
 LOG_FILE = os.path.join(LOGS_DIR, "log.log")
-self.astrum_api_key = config.get('astrum_api_key', '')
