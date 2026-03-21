@@ -1,421 +1,340 @@
 import asyncio
-import re
-import uuid
-from datetime import datetime, timezone
-from typing import Dict
-from urllib.parse import urlparse
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Optional
+from urllib.parse import urlparse, urlunparse
 
-from eth_account.messages import encode_defunct
 from loguru import logger
 
-from data.constants import DEFAULT_HEADERS
-from libs.eth_async.client import Client
+from data.settings import Settings
 from utils.browser import Browser
-from utils.captcha.captcha_handler import CaptchaHandler
 from utils.db_api.models import Wallet
-from utils.db_api.wallet_api import update_wallet_info
 
 
-class PrivyAuth:
-    __module__ = "Privy authentication"
+class CaptchaErrorKind(str, Enum):
+    CONFIG = "config"
+    NETWORK = "network"
+    TIMEOUT = "timeout"
+    PROVIDER = "provider"
+    RESPONSE = "response"
+    UNSUPPORTED = "unsupported"
 
-    BASE_URL = "https://privy.neuraprotocol.io/api/v1"
 
-    _refresh_semaphore = asyncio.Semaphore(2)
-    _siwe_semaphore = asyncio.Semaphore(1)
+@dataclass
+class CaptchaError(Exception):
+    kind: CaptchaErrorKind
+    message: str
+    details: Optional[str] = None
 
-    def __init__(self, client: Client, wallet: Wallet):
-        self.client = client
-        self.wallet = wallet
+    def __str__(self) -> str:
+        if self.details:
+            return f"[{self.kind}] {self.message}: {self.details}"
+        return f"[{self.kind}] {self.message}"
 
-        # Important: keep auth requests in the wallet proxy-context
-        self.session = Browser(wallet=self.wallet)
 
-        self.authentication = False
-        self.token_id = self.resolve_privy_ca_id()
-
-        self.headers = {
-            **DEFAULT_HEADERS,
-            "privy-app-id": "cmbpempz2011ll10l7iucga14",
-            "privy-ca-id": self.token_id,
-            "privy-client": "react-auth:2.25.0",
-        }
-
-    def __repr__(self):
-        return f"{self.__module__} | [{self.wallet.address}]"
+@dataclass
+class ProxyConfig:
+    scheme: str
+    host: str
+    port: int
+    login: Optional[str] = None
+    password: Optional[str] = None
 
     @property
-    def cookies(self) -> dict:
-        return {
-            k: v
-            for k, v in (self.wallet.cookies or {}).items()
-            if k in {
-                "privy-token",
-                "privy-id-token",
-                "privy-session",
-                "privy-refresh-token",
-                "privy-access-token",
-            }
-        }
+    def url(self) -> str:
+        auth = ""
+        if self.login and self.password:
+            auth = f"{self.login}:{self.password}@"
+        return f"{self.scheme}://{auth}{self.host}:{self.port}"
 
-    def _persist_auth_state(self, session_token: str, identity_token: str, cookies: dict) -> None:
-        update_wallet_info(address=self.wallet.address, name_column="session_token", data=session_token)
-        update_wallet_info(address=self.wallet.address, name_column="identity_token", data=identity_token)
-        update_wallet_info(address=self.wallet.address, name_column="cookies", data=cookies)
+    @property
+    def redacted_url(self) -> str:
+        auth = ""
+        if self.login and self.password:
+            auth = "***:***@"
+        return f"{self.scheme}://{auth}{self.host}:{self.port}"
 
-        self.wallet.session_token = session_token
-        self.wallet.identity_token = identity_token
-        self.wallet.cookies = cookies
 
-    def _merge_cookie_dicts(self, *cookie_dicts: dict) -> dict:
-        merged: dict = {}
-        for item in cookie_dicts:
-            if not item:
-                continue
-            merged.update({k: v for k, v in item.items() if v})
-        return merged
+class CaptchaHandler:
+    """
+    Решение hCaptcha через 2captcha API.
+    """
 
-    async def privy_authorize(self) -> bool:
-        if self.cookies:
-            try:
-                logger.info(f"{self.wallet} | Trying refresh via cookie")
-                refresh_status = await self.refresh_session_via_cookie()
+    CREATE_TASK_TIMEOUT = 20
+    POLL_TIMEOUT = 20
+    POLL_INTERVAL_SECONDS = 2
+    MAX_POLL_ATTEMPTS = 30
 
-                if refresh_status is True:
-                    self.authentication = True
-                    logger.success(
-                        f"{self.wallet} | Refresh via cookie: OK (session_token & identity_token & cookies updated)"
-                    )
-                    return True
+    def __init__(self, wallet: Wallet):
+        self.wallet = wallet
+        self.browser = Browser(wallet=wallet)
+        self.settings = Settings()
 
-                if refresh_status is None:
-                    if self.wallet.session_token and self.wallet.identity_token and self.cookies:
-                        self.authentication = True
-                        logger.warning(f"{self.wallet} | Refresh rate-limited (429), continue with cached session")
-                        return True
-
-                    logger.warning(f"{self.wallet} | Refresh rate-limited and no cached session available")
-                else:
-                    logger.warning(f"{self.wallet} | Refresh via cookie failed")
-
-            except Exception as e:
-                logger.warning(f"{self.wallet} | Failed to refresh session via cookies — {e}")
-
-        # If cookies not working, fallback to full SIWE with captcha
-        logger.info(f"{self.wallet} | Getting new session_token via SIWE...")
-        if await self.authenticate_via_siwe():
-            self.authentication = True
-            logger.success(f"{self.wallet} | SIWE: OK (session_token & identity_token & cookies saved)")
-            return True
-        else:
-            logger.error(f"{self.wallet} | SIWE failed: session_token, identity_token or cookies missing")
-            return False
-
-    async def refresh_session_via_cookie(self) -> bool | None:
-        async with PrivyAuth._refresh_semaphore:
-            cookies = {
-                k: v
-                for k, v in (self.wallet.cookies or {}).items()
-                if k in {
-                    "privy-token",
-                    "privy-id-token",
-                    "privy-session",
-                    "privy-refresh-token",
-                    "privy-access-token",
-                }
-            }
-
-            payload = {"refresh_token": "deprecated"}
-            headers = self.headers.copy()
-
-            if self.wallet.identity_token:
-                headers["authorization"] = f"Bearer {self.wallet.identity_token}"
-
-            try:
-                response = await self.session.post(
-                    url=f"{self.BASE_URL}/sessions",
-                    cookies=cookies,
-                    headers=headers,
-                    json=payload,
-                )
-
-                if response.status_code != 200:
-                    if response.status_code == 429:
-                        logger.warning(f"{self.wallet} | Refresh request rate-limited (429). Body: {response.text}")
-                        return None
-
-                    logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
-                    return False
-
-            except Exception as e:
-                logger.error(f"{self.wallet} | Refresh request failed — {e}")
-                return False
-
-            try:
-                data = response.json()
-                session_token = data.get("token")
-                identity_token = data.get("identity_token")
-
-                response_cookies = self.extract_privy_tokens(response.headers.get("set-cookie"))
-                merged_cookies = self._merge_cookie_dicts(cookies, response_cookies)
-
-                if not (session_token and identity_token and merged_cookies):
-                    logger.error(
-                        f"{self.wallet} | Refresh failed "
-                        f"(session_token={bool(session_token)}, identity_token={bool(identity_token)}, "
-                        f"cookies={bool(merged_cookies)})"
-                    )
-                    return False
-
-                self._persist_auth_state(
-                    session_token=session_token,
-                    identity_token=identity_token,
-                    cookies=merged_cookies,
-                )
-                return True
-
-            except Exception as e:
-                logger.error(f"{self.wallet} | Failed to parse refresh response — {e}")
-                return False
-
-    async def authenticate_via_siwe(self) -> bool:
-        async with PrivyAuth._siwe_semaphore:
-            try:
-                nonce = await self.get_nonce()
-                logger.debug(f"{self.wallet} | Nonce obtained: {nonce[:8] + '...' if nonce else 'None'}")
-            except Exception as e:
-                logger.error(f"{self.wallet} | Failed to obtain nonce — {e}")
-                return False
-
-            message = self.siwe_message(nonce=nonce)
-            signature = self.client.account.sign_message(signable_message=encode_defunct(text=message))
-
-            payload = {
-                "message": message,
-                "signature": signature.signature.hex(),
-                "chainId": "eip155:267",
-                "walletClientType": "metamask",
-                "connectorType": "injected",
-                "mode": "login-or-sign-up",
-            }
-
-            try:
-                response = await self.session.post(
-                    url=f"{self.BASE_URL}/siwe/authenticate",
-                    headers=self.headers,
-                    json=payload,
-                )
-                if response.status_code != 200:
-                    logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
-                    return False
-
-                data = response.json()
-                session_token = data.get("token")
-                identity_token = data.get("identity_token")
-                is_new_user = data.get("is_new_user", False)
-
-                raw_set_cookie = response.headers.get("set-cookie")
-                cookie_header = self.extract_privy_tokens(raw_set_cookie)
-
-                if not (session_token and identity_token and cookie_header):
-                    logger.error(
-                        f"{self.wallet} | SIWE: FAILED (session_token={bool(session_token)},"
-                        f"identity_token={bool(identity_token)}, cookie={bool(cookie_header)})"
-                    )
-                    return False
-
-                self._persist_auth_state(
-                    session_token=session_token,
-                    identity_token=identity_token,
-                    cookies=cookie_header,
-                )
-
-                # Send analytics events
-                if not await self.send_analytics_events(is_new_user=is_new_user):
-                    logger.error(f"{self.wallet} | Analytics events failed")
-                    return False
-
-                return True
-
-            except Exception as e:
-                logger.error(f"{self.wallet} | Failed to complete SIWE authentication — {e}")
-                return False
-
-    async def get_nonce(self) -> str:
-        try:
-            captcha_handler = CaptchaHandler(wallet=self.wallet)
-    
-            # Решаем hCaptcha через Astrum Solver
-            captcha_token = await captcha_handler.hcaptcha_token(
-                websiteURL="https://neuraverse.neuraprotocol.io/",
-                siteKey="h:b9fc5a50-2e5c-457a-9582-80ce342c2534",
-                is_invisible=True,
-            )
-    
-            if not captcha_token:
-                raise ValueError("Captcha token missing")
-    
-            logger.info(f"{self.wallet} | Captcha token obtained, length: {len(captcha_token)}")
-            logger.debug(f"{self.wallet} | Full token: {captcha_token}")
-    
-        except Exception as e:
-            logger.error(f"{self.wallet} | Failed to obtain captcha token — {e}")
-            raise
-    
-        payload = {
-            "address": self.wallet.address,
-            "token": captcha_token,
-        }
-    
-        logger.debug(f"{self.wallet} | Sending to /siwe/init: address={self.wallet.address}, token_length={len(captcha_token)}")
-    
-        try:
-            response = await self.session.post(
-                url=f"{self.BASE_URL}/siwe/init",
-                headers=self.headers,
-                json=payload,
-            )
-            if response.status_code != 200:
-                logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
-                raise RuntimeError("Failed to get nonce")
-    
-            nonce = response.json().get("nonce")
-            if not nonce:
-                logger.error(f"{self.wallet} | Nonce missing in response body")
-                raise ValueError("Nonce missing in response")
-    
-            return nonce
-    
-        except Exception as e:
-            logger.error(f"{self.wallet} | get_nonce(): request/parse error — {e}")
-            raise
-    async def send_analytics_events(self, is_new_user: bool) -> bool:
-        try:
-            cookies = {
-                k: v
-                for k, v in (self.wallet.cookies or {}).items()
-                if k in {
-                    "privy-token",
-                    "privy-id-token",
-                    "privy-session",
-                    "privy-refresh-token",
-                    "privy-access-token",
-                }
-            }
-
-            headers = {
-                **self.headers,
-                "authorization": f"Bearer {self.wallet.identity_token}",
-            }
-
-            utc_time_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-
-            payload = {
-                "event_name": "sdk_authenticate_siwe",
-                "client_id": self.token_id,
-                "payload": {
-                    "connectorType": "injected",
-                    "walletClientType": "metamask",
-                    "clientTimestamp": utc_time_now,
-                },
-            }
-
-            response = await self.session.post(
-                url=f"{self.BASE_URL}/analytics_events",
-                cookies=cookies,
-                headers=headers,
-                json=payload,
-            )
-            if response.status_code != 200:
-                logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
-                return False
-
-            payload = {
-                "event_name": "sdk_authenticate",
-                "client_id": self.token_id,
-                "payload": {
-                    "method": "siwe",
-                    "isNewUser": is_new_user,
-                    "clientTimestamp": utc_time_now,
-                },
-            }
-
-            response = await self.session.post(
-                url=f"{self.BASE_URL}/analytics_events",
-                cookies=cookies,
-                headers=headers,
-                json=payload,
-            )
-            if response.status_code != 200:
-                logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
-                return False
-
-            return True
-
-        except Exception as e:
-            logger.error(f"{self.wallet} | Analytics event processing failed — {e}")
-            return False
-
-    def siwe_message(self, nonce: str) -> str:
-        issued_at = datetime.utcnow().isoformat() + "Z"
-
-        return (
-            "neuraverse.neuraprotocol.io wants you to sign in with your Ethereum account:\n"
-            f"{self.wallet.address}\n\n"
-            "By signing, you are proving you own this wallet and logging in. "
-            "This does not initiate a transaction or cost any fees.\n\n"
-            "URI: https://neuraverse.neuraprotocol.io\n"
-            "Version: 1\n"
-            "Chain ID: 267\n"
-            f"Nonce: {nonce}\n"
-            f"Issued At: {issued_at}\n"
-            "Resources:\n"
-            "- https://privy.io"
+    @property
+    def user_agent(self) -> str:
+        return getattr(self.settings, "default_user_agent", None) or (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/136.0.0.0 Safari/537.36"
         )
 
-    def resolve_privy_ca_id(self) -> str:
-        wallet_addr = (self.wallet.address or "").lower()
-        proxy_raw = self.wallet.proxy or ""
-        proxy_norm = self.normalize_proxy(proxy_raw)
+    def parse_proxy(self) -> Optional[ProxyConfig]:
+        proxy_raw = getattr(self.wallet, "proxy", None)
+        if not proxy_raw:
+            return None
 
-        seed = f"{wallet_addr}|{proxy_norm}" if proxy_norm else wallet_addr
-        return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
+        parsed = urlparse(proxy_raw if "://" in proxy_raw else f"http://{proxy_raw}")
+        scheme = (parsed.scheme or "http").lower()
 
-    def normalize_proxy(self, proxy: str) -> str:
-        if not proxy:
-            return ""
+        allowed_schemes = {"http", "https", "socks5", "socks4"}
+        if scheme not in allowed_schemes:
+            raise CaptchaError(
+                kind=CaptchaErrorKind.CONFIG,
+                message="Unsupported proxy scheme",
+                details=scheme,
+            )
+
+        if not parsed.hostname or not parsed.port:
+            raise CaptchaError(
+                kind=CaptchaErrorKind.CONFIG,
+                message="Proxy is missing host or port",
+                details=proxy_raw,
+            )
+
+        normalized_scheme = "http" if scheme == "https" else scheme
+
+        return ProxyConfig(
+            scheme=normalized_scheme,
+            host=parsed.hostname,
+            port=parsed.port,
+            login=parsed.username,
+            password=parsed.password,
+        )
+
+    def _redact_value(self, key: str, value: Any) -> Any:
+        lowered = key.lower()
+        if lowered in {"clientkey", "apikey", "api_key", "token", "authorization"}:
+            return "***"
+        if lowered == "proxyurl" and isinstance(value, str):
+            try:
+                parsed = urlparse(value)
+                if parsed.username and parsed.password:
+                    redacted_netloc = f"***:***@{parsed.hostname}:{parsed.port}"
+                else:
+                    redacted_netloc = parsed.netloc
+                redacted = parsed._replace(netloc=redacted_netloc)
+                return urlunparse(redacted)
+            except Exception:
+                return "***"
+        return value
+
+    def _redact_payload(self, payload: Any) -> Any:
+        if isinstance(payload, dict):
+            return {k: self._redact_payload(self._redact_value(k, v)) for k, v in payload.items()}
+        if isinstance(payload, list):
+            return [self._redact_payload(v) for v in payload]
+        return payload
+
+    def _log_debug_payload(self, title: str, payload: dict[str, Any]) -> None:
+        logger.debug(f"{self.wallet} | {title}: {self._redact_payload(payload)}")
+
+    async def _post_json(
+        self,
+        *,
+        url: str,
+        json_payload: dict[str, Any],
+        timeout_seconds: int,
+        operation_name: str,
+    ) -> dict[str, Any]:
+        self._log_debug_payload(operation_name, json_payload)
 
         try:
-            p = urlparse(proxy if "://" in proxy else f"http://{proxy}")
-            host = p.hostname or ""
-            port = p.port
+            response = await asyncio.wait_for(
+                self.browser.post(url=url, json=json_payload),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError as e:
+            raise CaptchaError(
+                kind=CaptchaErrorKind.TIMEOUT,
+                message=f"{operation_name} timed out",
+            ) from e
+        except Exception as e:
+            raise CaptchaError(
+                kind=CaptchaErrorKind.NETWORK,
+                message=f"{operation_name} request failed",
+                details=str(e),
+            ) from e
 
-            if not host or not port:
-                return ""
+        if response.status_code != 200:
+            raise CaptchaError(
+                kind=CaptchaErrorKind.NETWORK,
+                message=f"{operation_name} returned HTTP {response.status_code}",
+                details=(response.text[:500] if getattr(response, "text", None) else None),
+            )
 
-            return f"{host}:{port}"
+        try:
+            data = response.json()
+        except Exception as e:
+            text_preview = ""
+            try:
+                text_preview = response.text[:500]
+            except Exception:
+                pass
+            raise CaptchaError(
+                kind=CaptchaErrorKind.RESPONSE,
+                message=f"{operation_name} returned non-JSON response",
+                details=text_preview,
+            ) from e
 
-        except Exception:
-            return ""
+        if not isinstance(data, dict):
+            raise CaptchaError(
+                kind=CaptchaErrorKind.RESPONSE,
+                message=f"{operation_name} returned invalid JSON type",
+                details=type(data).__name__,
+            )
+        return data
 
-    def extract_privy_tokens(self, set_cookie: str | None) -> Dict[str, str]:
-        wanted = {
-            "privy-token",
-            "privy-id-token",
-            "privy-refresh-token",
-            "privy-access-token",
-            "privy-session",
+    def _validate_api_key_present(self) -> None:
+        api_key = getattr(self.settings, "twocaptcha_api_key", None)
+        if not api_key:
+            raise CaptchaError(
+                kind=CaptchaErrorKind.CONFIG,
+                message="twocaptcha_api_key is missing in settings",
+            )
+
+    async def _create_hcaptcha_task(
+        self,
+        website_url: str,
+        site_key: str,
+        is_invisible: bool = True,
+        rqdata: Optional[str] = None,
+    ) -> int:
+        """Создаёт задачу в 2captcha"""
+        payload = {
+            "clientKey": self.settings.twocaptcha_api_key,
+            "task": {
+                "type": "HCaptchaTaskProxyless",
+                "websiteURL": website_url,
+                "websiteKey": site_key,
+                "isInvisible": is_invisible,
+                "userAgent": self.user_agent,
+            }
         }
-        result: Dict[str, str] = {}
 
-        if not set_cookie:
-            return result
+        if rqdata:
+            payload["task"]["rqdata"] = rqdata
 
-        for match in re.finditer(r"(?P<name>[^=;,\s]+)=(?P<value>[^;\r\n,]+)", set_cookie):
-            name = match.group("name").strip()
-            value = match.group("value").strip()
+        # Проверяем, есть ли прокси
+        proxy = self.parse_proxy()
+        if proxy:
+            payload["task"]["type"] = "HCaptchaTask"
+            payload["task"].update({
+                "proxyType": proxy.scheme,
+                "proxyAddress": proxy.host,
+                "proxyPort": proxy.port,
+            })
+            if proxy.login and proxy.password:
+                payload["task"].update({
+                    "proxyLogin": proxy.login,
+                    "proxyPassword": proxy.password,
+                })
 
-            if name in wanted:
-                result[name] = value
+        data = await self._post_json(
+            url="https://2captcha.com/in.php",
+            json_payload=payload,
+            timeout_seconds=self.CREATE_TASK_TIMEOUT,
+            operation_name="createTask",
+        )
 
-        return result
+        if data.get("status") != 1:
+            raise CaptchaError(
+                kind=CaptchaErrorKind.PROVIDER,
+                message="2captcha error creating task",
+                details=data.get("request", "Unknown error"),
+            )
+
+        task_id = data.get("request")
+        if not task_id:
+            raise CaptchaError(
+                kind=CaptchaErrorKind.RESPONSE,
+                message="2captcha response missing taskId",
+            )
+
+        logger.info(f"{self.wallet} | Created 2captcha hCaptcha task: {task_id}")
+        return int(task_id)
+
+    async def _get_task_result(self, task_id: int) -> dict[str, Any]:
+        """Опрашивает результат в 2captcha"""
+        payload = {
+            "clientKey": self.settings.twocaptcha_api_key,
+            "action": "get",
+            "taskId": task_id,
+        }
+
+        for attempt in range(self.MAX_POLL_ATTEMPTS):
+            data = await self._post_json(
+                url="https://2captcha.com/res.php",
+                json_payload=payload,
+                timeout_seconds=self.POLL_TIMEOUT,
+                operation_name=f"getTaskResult (attempt {attempt+1})",
+            )
+
+            status = data.get("status")
+            if status == 1:
+                solution = {"gRecaptchaResponse": data.get("request")}
+                logger.info(f"{self.wallet} | 2captcha solution received")
+                return solution
+            elif status == 0 and data.get("request") == "CAPCHA_NOT_READY":
+                await asyncio.sleep(self.POLL_INTERVAL_SECONDS)
+                continue
+            else:
+                raise CaptchaError(
+                    kind=CaptchaErrorKind.PROVIDER,
+                    message=f"2captcha returned error: {data.get('request')}",
+                )
+
+        raise CaptchaError(
+            kind=CaptchaErrorKind.TIMEOUT,
+            message=f"Task {task_id} not solved after {self.MAX_POLL_ATTEMPTS} attempts",
+        )
+
+    async def hcaptcha_token(
+        self,
+        websiteURL: str,
+        siteKey: str,
+        is_invisible: bool = True,
+        rqdata: Optional[str] = None,
+    ) -> str:
+        """
+        Решает hCaptcha через 2captcha и возвращает токен.
+        """
+        self._validate_api_key_present()
+
+        max_retries = 10
+        for attempt in range(1, max_retries + 1):
+            try:
+                task_id = await self._create_hcaptcha_task(
+                    website_url=websiteURL,
+                    site_key=siteKey,
+                    is_invisible=is_invisible,
+                    rqdata=rqdata,
+                )
+                solution = await self._get_task_result(task_id)
+                token = solution.get("gRecaptchaResponse")
+                if token:
+                    logger.success(f"{self.wallet} | hCaptcha solved successfully")
+                    logger.info(f"{self.wallet} | Token (first 80 chars): {token[:80]}...")
+                    return token
+                else:
+                    logger.warning(f"{self.wallet} | Solution missing token: {solution}")
+            except CaptchaError as e:
+                logger.warning(f"{self.wallet} | Attempt {attempt}/{max_retries} failed: {e}")
+            except Exception as e:
+                logger.warning(f"{self.wallet} | Attempt {attempt}/{max_retries} unexpected error: {e}")
+
+            await asyncio.sleep(3)
+
+        raise CaptchaError(
+            kind=CaptchaErrorKind.PROVIDER,
+            message=f"All {max_retries} attempts to solve hCaptcha failed",
+        )
