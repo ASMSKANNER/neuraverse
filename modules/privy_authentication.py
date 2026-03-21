@@ -250,7 +250,6 @@ class PrivyAuth:
                 websiteURL="https://neuraverse.neuraprotocol.io/",
                 siteKey="b9fc5a50-2e5c-457a-9582-80ce342c2534",
                 is_invisible=True,
-                # rqdata = None (not needed for this site)
             )
             if not captcha_token:
                 raise ValueError("Captcha token missing")
