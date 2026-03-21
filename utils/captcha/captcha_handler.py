@@ -55,32 +55,9 @@ class ProxyConfig:
         return f"{self.scheme}://{auth}{self.host}:{self.port}"
 
 
-@dataclass
-class CaptchaTaskStatus:
-    status: str
-    solution: Optional[dict[str, Any]] = None
-    raw: Optional[dict[str, Any]] = None
-
-
-class ManualReauthRequired(RuntimeError):
-    pass
-
-
 class CaptchaHandler:
     """
-    Safe captcha handler.
-
-    This version fixes engineering issues in the original implementation:
-    - no secret leakage in logs
-    - strict proxy parsing
-    - cached settings
-    - unified timeouts / request wrapper
-    - typed error model
-    - no dead code
-    - no hard-coded user agent
-    - no silent ambiguous failure modes
-
-    It does NOT implement automatic solving of interactive captcha.
+    Решение hCaptcha через Astrum Solver с безопасной обработкой.
     """
 
     CREATE_TASK_TIMEOUT = 20
@@ -95,8 +72,7 @@ class CaptchaHandler:
 
     @property
     def user_agent(self) -> str:
-        # Prefer a single UA source of truth if available in your project.
-        # Fallback is deliberately generic and stable.
+        # Единый источник UA (можно вынести в settings)
         return getattr(self.settings, "default_user_agent", None) or (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -138,22 +114,19 @@ class CaptchaHandler:
 
     def _redact_value(self, key: str, value: Any) -> Any:
         lowered = key.lower()
-
         if lowered in {"clientkey", "apikey", "api_key", "token", "authorization"}:
             return "***"
-
         if lowered == "proxyurl" and isinstance(value, str):
             try:
                 parsed = urlparse(value)
-                redacted = parsed._replace(
-                    netloc=f"***:***@{parsed.hostname}:{parsed.port}"
-                    if parsed.username and parsed.password
-                    else parsed.netloc
-                )
+                if parsed.username and parsed.password:
+                    redacted_netloc = f"***:***@{parsed.hostname}:{parsed.port}"
+                else:
+                    redacted_netloc = parsed.netloc
+                redacted = parsed._replace(netloc=redacted_netloc)
                 return urlunparse(redacted)
             except Exception:
                 return "***"
-
         return value
 
     def _redact_payload(self, payload: Any) -> Any:
@@ -208,7 +181,6 @@ class CaptchaHandler:
                 text_preview = response.text[:500]
             except Exception:
                 pass
-
             raise CaptchaError(
                 kind=CaptchaErrorKind.RESPONSE,
                 message=f"{operation_name} returned non-JSON response",
@@ -221,7 +193,6 @@ class CaptchaHandler:
                 message=f"{operation_name} returned invalid JSON type",
                 details=type(data).__name__,
             )
-
         return data
 
     def _validate_api_key_present(self) -> None:
@@ -268,10 +239,7 @@ class CaptchaHandler:
         is_invisible: bool = True,
         rqdata: Optional[str] = None,
     ) -> str:
-        """
-        Engineering-safe request builder only.
-        Deliberately stops before enabling automatic solve workflow.
-        """
+        """Создаёт задачу в Astrum Solver и возвращает taskId."""
         payload = self._build_hcaptcha_task_payload(
             website_url=website_url,
             site_key=site_key,
@@ -279,18 +247,72 @@ class CaptchaHandler:
             rqdata=rqdata,
         )
 
-        # We intentionally do not perform createTask against a captcha-solver API.
-        # This handler is restricted to safe engineering behavior.
-        raise ManualReauthRequired(
-            "Interactive captcha flow requires manual reauthorization."
+        data = await self._post_json(
+            url="https://solver.astrum.foundation/api/createTask",
+            json_payload=payload,
+            timeout_seconds=self.CREATE_TASK_TIMEOUT,
+            operation_name="createTask",
         )
 
-    async def _get_task_result(self, task_id: str) -> CaptchaTaskStatus:
-        """
-        Engineering-safe placeholder.
-        """
-        raise ManualReauthRequired(
-            "Interactive captcha flow requires manual reauthorization."
+        if data.get("errorId") != 0:
+            raise CaptchaError(
+                kind=CaptchaErrorKind.PROVIDER,
+                message="Astrum error creating task",
+                details=data.get("errorDescription", "Unknown error"),
+            )
+
+        task_id = data.get("taskId")
+        if not task_id:
+            raise CaptchaError(
+                kind=CaptchaErrorKind.RESPONSE,
+                message="Astrum response missing taskId",
+            )
+
+        logger.info(f"{self.wallet} | Created hCaptcha task: {task_id}")
+        return task_id
+
+    async def _get_task_result(self, task_id: str) -> dict[str, Any]:
+        """Опрашивает результат задачи."""
+        payload = {
+            "clientKey": self.settings.astrum_api_key,
+            "task": {
+                "taskId": task_id,
+                "type": "hcaptcha",
+            },
+        }
+
+        for attempt in range(self.MAX_POLL_ATTEMPTS):
+            data = await self._post_json(
+                url="https://solver.astrum.foundation/api/getTaskResult",
+                json_payload=payload,
+                timeout_seconds=self.POLL_TIMEOUT,
+                operation_name=f"getTaskResult (attempt {attempt+1})",
+            )
+
+            status = data.get("status")
+            if status == "closed":
+                solution = data.get("solution", {})
+                token = solution.get("token")
+                if not token:
+                    raise CaptchaError(
+                        kind=CaptchaErrorKind.RESPONSE,
+                        message="Astrum returned solution without token",
+                        details=str(solution),
+                    )
+                return solution
+            elif status == "processing":
+                await asyncio.sleep(self.POLL_INTERVAL_SECONDS)
+                continue
+            else:
+                raise CaptchaError(
+                    kind=CaptchaErrorKind.PROVIDER,
+                    message=f"Astrum returned unknown status: {status}",
+                    details=data.get("errorDescription"),
+                )
+
+        raise CaptchaError(
+            kind=CaptchaErrorKind.TIMEOUT,
+            message=f"Task {task_id} not solved after {self.MAX_POLL_ATTEMPTS} attempts",
         )
 
     async def hcaptcha_token(
@@ -299,14 +321,13 @@ class CaptchaHandler:
         siteKey: str,
         is_invisible: bool = True,
         rqdata: Optional[str] = None,
-    ) -> Optional[str]:
+    ) -> str:
         """
-        Safe public method:
-        validates config and environment,
-        then explicitly signals that interactive captcha must be handled manually.
+        Решает hCaptcha через Astrum Solver и возвращает токен.
         """
+        self._validate_api_key_present()
+        # Проверяем возможность построить payload (например, валидность прокси)
         try:
-            self._validate_api_key_present()
             _ = self._build_hcaptcha_task_payload(
                 website_url=websiteURL,
                 site_key=siteKey,
@@ -317,11 +338,35 @@ class CaptchaHandler:
             raise
         except Exception as e:
             raise CaptchaError(
-                kind=CaptchaErrorKind.RESPONSE,
-                message="Failed to prepare hCaptcha request context",
+                kind=CaptchaErrorKind.CONFIG,
+                message="Failed to build hCaptcha request",
                 details=str(e),
             ) from e
 
-        raise ManualReauthRequired(
-            "Interactive captcha detected. Manual reauthorization is required."
+        max_retries = 10
+        for attempt in range(1, max_retries + 1):
+            try:
+                task_id = await self._create_hcaptcha_task(
+                    website_url=websiteURL,
+                    site_key=siteKey,
+                    is_invisible=is_invisible,
+                    rqdata=rqdata,
+                )
+                solution = await self._get_task_result(task_id)
+                token = solution.get("token")
+                if token:
+                    logger.success(f"{self.wallet} | hCaptcha solved successfully")
+                    return token
+                else:
+                    logger.warning(f"{self.wallet} | Solution missing token: {solution}")
+            except CaptchaError as e:
+                logger.warning(f"{self.wallet} | Attempt {attempt}/{max_retries} failed: {e}")
+            except Exception as e:
+                logger.warning(f"{self.wallet} | Attempt {attempt}/{max_retries} unexpected error: {e}")
+
+            await asyncio.sleep(3)
+
+        raise CaptchaError(
+            kind=CaptchaErrorKind.PROVIDER,
+            message=f"All {max_retries} attempts to solve hCaptcha failed",
         )
