@@ -213,7 +213,7 @@ class CaptchaHandler:
         task_data: dict[str, Any] = {
             "type": "nn",
             "websiteURL": website_url,
-            "siteKey": site_key,          # ключевое изменение: siteKey
+            "siteKey": site_key,
         }
 
         if rqdata:
@@ -292,7 +292,7 @@ class CaptchaHandler:
                         details=str(solution),
                     )
                 return solution
-            elif status == "processing":
+            elif status in ("processing", "in_progress", "opened"):
                 await asyncio.sleep(self.POLL_INTERVAL_SECONDS)
                 continue
             else:
@@ -311,14 +311,13 @@ class CaptchaHandler:
         self,
         websiteURL: str,
         siteKey: str,
-        is_invisible: bool = True,       # оставлен для совместимости, но не используется
+        is_invisible: bool = True,
         rqdata: Optional[str] = None,
     ) -> str:
         """
         Решает hCaptcha через Astrum Solver (тип nn) и возвращает токен.
         """
         self._validate_api_key_present()
-        # Небольшая проверка перед циклом
         try:
             _ = self._build_hcaptcha_task_payload(
                 website_url=websiteURL,
