@@ -248,7 +248,7 @@ class PrivyAuth:
             # Решаем hCaptcha через Astrum Solver
             captcha_token = await captcha_handler.hcaptcha_token(
                 websiteURL="https://neuraverse.neuraprotocol.io/",
-                siteKey="b9fc5a50-2e5c-457a-9582-80ce342c2534",
+                siteKey="h:b9fc5a50-2e5c-457a-9582-80ce342c2534",
                 is_invisible=True,
             )
     
