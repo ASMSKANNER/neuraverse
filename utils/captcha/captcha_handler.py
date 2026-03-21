@@ -275,7 +275,7 @@ class CaptchaHandler:
             "clientKey": self.settings.astrum_api_key,
             "task": {
                 "taskId": task_id,
-                "type": "hcaptcha",
+                "type": "nn",                 # изменено с "hcaptcha"
             },
         }
 
