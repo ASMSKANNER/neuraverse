@@ -52,6 +52,7 @@ class Settings(Singleton):
 
         self.capmonster_api_key = json_data.get("capmonster_api_key", "")
         self.astrum_api_key = json_data.get("astrum_api_key", "")
+        self.twocaptcha_api_key = json_data.get("twocaptcha_api_key", "")
 
 # Configure the logger based on the settings
 settings = Settings()
