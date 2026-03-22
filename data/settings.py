@@ -50,9 +50,22 @@ class Settings(Singleton):
 
         self.omnihub_repeat_if_already_minted = json_data.get("omnihub_repeat_if_already_minted", False)
 
+        # Legacy captcha services (оставлены для обратной совместимости)
         self.capmonster_api_key = json_data.get("capmonster_api_key", "")
         self.astrum_api_key = json_data.get("astrum_api_key", "")
         self.twocaptcha_api_key = json_data.get("twocaptcha_api_key", "")
+        
+        # OhMyCaptcha settings (новый сервис)
+        self.ohmycaptcha_url = json_data.get("ohmycaptcha_url", "http://localhost:8000")
+        self.ohmycaptcha_client_key = json_data.get("ohmycaptcha_client_key", "")
+        
+        # Для удобства: если указан ohmycaptcha_client_key, используем OhMyCaptcha
+        # Если нет - пробуем использовать Capmonster (legacy)
+        self.captcha_service = "ohmycaptcha" if self.ohmycaptcha_client_key else "capmonster"
+        
+        # Активный API ключ для обратной совместимости
+        self.captcha_api_key = self.ohmycaptcha_client_key or self.capmonster_api_key
+
 
 # Configure the logger based on the settings
 settings = Settings()
@@ -63,3 +76,11 @@ logger.remove()  # Remove the default logger
 logger.add(sys.stderr, level=settings.log_level)
 
 logger.add(LOG_FILE, retention="10 days", level=settings.log_level)
+
+# Логируем выбранный сервис капчи
+if settings.captcha_service == "ohmycaptcha" and settings.ohmycaptcha_client_key:
+    logger.info(f"Using OhMyCaptcha service at {settings.ohmycaptcha_url}")
+elif settings.capmonster_api_key:
+    logger.info("Using Capmonster service (legacy)")
+else:
+    logger.warning("No captcha service configured! Faucet may not work.")
