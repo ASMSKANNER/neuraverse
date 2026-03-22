@@ -237,21 +237,39 @@ class PrivyAuth:
                 return False
 
     async def get_nonce(self) -> str:
+        """
+        Получение nonce от сервера с решением капчи.
+        Использует OhMyCaptcha для решения hCaptcha.
+        """
         try:
-            captcha_handler = CaptchaHandler(wallet=self.wallet)
-
-            # Решаем hCaptcha через 2captcha
-            captcha_token = await captcha_handler.hcaptcha_token(
-                websiteURL="https://neuraverse.neuraprotocol.io/",
-                siteKey="b9fc5a50-2e5c-457a-9582-80ce342c2534",
-                is_invisible=True,
-            )
+            from data.settings import settings
+            
+            # Проверяем, какой сервис капчи используется
+            if settings.captcha_service == "ohmycaptcha":
+                logger.debug(f"{self.wallet} | Using OhMyCaptcha for captcha solving")
+                captcha_handler = CaptchaHandler(wallet=self.wallet)
+                
+                # Решаем hCaptcha через OhMyCaptcha
+                # Используем метод solve_hcaptcha из нашего обработчика
+                captcha_token = await captcha_handler.solve_hcaptcha(
+                    website_url="https://neuraverse.neuraprotocol.io/",
+                    website_key="b9fc5a50-2e5c-457a-9582-80ce342c2534"
+                )
+            else:
+                # Legacy: используем 2captcha (старый способ)
+                logger.debug(f"{self.wallet} | Using 2captcha (legacy) for captcha solving")
+                captcha_handler = CaptchaHandler(wallet=self.wallet)
+                captcha_token = await captcha_handler.hcaptcha_token(
+                    websiteURL="https://neuraverse.neuraprotocol.io/",
+                    siteKey="b9fc5a50-2e5c-457a-9582-80ce342c2534",
+                    is_invisible=True,
+                )
 
             if not captcha_token:
                 raise ValueError("Captcha token missing")
 
             logger.info(f"{self.wallet} | Captcha token obtained, length: {len(captcha_token)}")
-            logger.debug(f"{self.wallet} | Full token: {captcha_token}")
+            logger.debug(f"{self.wallet} | Full token: {captcha_token[:50]}...")
 
         except Exception as e:
             logger.error(f"{self.wallet} | Failed to obtain captcha token — {e}")
