@@ -82,6 +82,10 @@ omnihub_repeat_if_already_minted: False
 
 # Api Key from https://dash.capmonster.cloud/
 capmonster_api_key: ""
+astrum_api_key: ""
+twocaptcha_api_key: ""
+ohmycaptcha_url: "http://localhost:8000"
+ohmycaptcha_client_key: ""
 
 # AI chat interactions to perform per wallet
 ai_chat_count:
