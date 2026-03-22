@@ -2,9 +2,9 @@ import httpx
 import time
 import logging
 from typing import Optional
+from urllib.parse import urlparse
 from loguru import logger
 
-# Импортируем настройки для OhMyCaptcha
 import sys
 sys.path.insert(0, '..')
 from data.settings import settings
@@ -12,12 +12,12 @@ from data.settings import settings
 
 class CaptchaHandler:
     """
-    Обработчик капчи через локальный сервер OhMyCaptcha
+    Обработчик капчи через локальный сервер OhMyCaptcha с поддержкой прокси и невидимой капчи
     """
     
     def __init__(self, wallet=None, api_key: str = None):
         """
-        :param wallet: объект кошелька (для совместимости со старым кодом)
+        :param wallet: объект кошелька (для передачи прокси)
         :param api_key: не используется, оставлен для совместимости
         """
         self.wallet = wallet
@@ -33,10 +33,34 @@ class CaptchaHandler:
         else:
             logger.debug(f"CaptchaHandler initialized with OhMyCaptcha at {self.ohmycaptcha_url}")
     
+    def _parse_proxy(self, proxy_str: str) -> dict | None:
+        """Парсит прокси из строки формата http://user:pass@ip:port"""
+        if not proxy_str:
+            return None
+        try:
+            parsed = urlparse(proxy_str if "://" in proxy_str else f"http://{proxy_str}")
+            host = parsed.hostname
+            port = parsed.port
+            if not host or not port:
+                return None
+            result = {
+                "proxyType": "http",
+                "proxyAddress": host,
+                "proxyPort": port,
+            }
+            if parsed.username and parsed.password:
+                result["proxyLogin"] = parsed.username
+                result["proxyPassword"] = parsed.password
+            return result
+        except Exception as e:
+            logger.error(f"Failed to parse proxy: {e}")
+            return None
+    
     def _create_task(self, task_type: str, website_url: str, website_key: str, 
-                     page_action: str = "") -> Optional[str]:
+                     page_action: str = "", is_invisible: bool = True) -> Optional[str]:
         """
-        Создает задачу в OhMyCaptcha
+        Создаёт задачу в OhMyCaptcha.
+        Поддерживает прокси (если у кошелька есть) и параметр isInvisible.
         """
         if not self.ohmycaptcha_client_key:
             logger.error("OhMyCaptcha client key missing")
@@ -50,6 +74,22 @@ class CaptchaHandler:
         
         if page_action:
             task_data["pageAction"] = page_action
+        
+        # Для hCaptcha добавляем параметр isInvisible (по умолчанию True)
+        if task_type in ("HCaptchaTaskProxyless", "HCaptchaTask"):
+            task_data["isInvisible"] = is_invisible
+            logger.debug(f"Set isInvisible={is_invisible} for hCaptcha task")
+        
+        # Добавляем прокси, если у кошелька есть
+        if self.wallet and hasattr(self.wallet, 'proxy') and self.wallet.proxy:
+            proxy_config = self._parse_proxy(self.wallet.proxy)
+            if proxy_config:
+                task_data.update(proxy_config)
+                logger.info(f"Using proxy for captcha: {proxy_config['proxyAddress']}:{proxy_config['proxyPort']}")
+            else:
+                logger.warning(f"Could not parse proxy: {self.wallet.proxy}")
+        else:
+            logger.debug("No proxy provided for captcha task")
         
         payload = {
             "clientKey": self.ohmycaptcha_client_key,
@@ -101,7 +141,6 @@ class CaptchaHandler:
                 
                 if data.get("status") == "ready":
                     solution = data.get("solution", {})
-                    # Для hCaptcha токен в поле gRecaptchaResponse
                     token = solution.get("gRecaptchaResponse") or solution.get("token")
                     if token:
                         logger.debug(f"OhMyCaptcha solved: {token[:50]}...")
@@ -138,7 +177,8 @@ class CaptchaHandler:
         task_id = self._create_task(
             task_type="HCaptchaTaskProxyless",
             website_url=websiteURL,
-            website_key=siteKey
+            website_key=siteKey,
+            is_invisible=is_invisible
         )
         if not task_id:
             return None
