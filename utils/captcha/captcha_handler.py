@@ -1,371 +1,222 @@
-import asyncio
-from dataclasses import dataclass
-from enum import Enum
-from typing import Any, Optional
-from urllib.parse import urlparse, urlunparse
+import httpx
+import time
+import json
+import logging
+from typing import Optional, Dict, Any
 
-from loguru import logger
-
-from data.settings import Settings
-from utils.browser import Browser
-from utils.db_api.models import Wallet
-
-
-class CaptchaErrorKind(str, Enum):
-    CONFIG = "config"
-    NETWORK = "network"
-    TIMEOUT = "timeout"
-    PROVIDER = "provider"
-    RESPONSE = "response"
-    UNSUPPORTED = "unsupported"
-
-
-@dataclass
-class CaptchaError(Exception):
-    kind: CaptchaErrorKind
-    message: str
-    details: Optional[str] = None
-
-    def __str__(self) -> str:
-        if self.details:
-            return f"[{self.kind}] {self.message}: {self.details}"
-        return f"[{self.kind}] {self.message}"
-
-
-@dataclass
-class ProxyConfig:
-    scheme: str
-    host: str
-    port: int
-    login: Optional[str] = None
-    password: Optional[str] = None
-
-    @property
-    def url(self) -> str:
-        auth = ""
-        if self.login and self.password:
-            auth = f"{self.login}:{self.password}@"
-        return f"{self.scheme}://{auth}{self.host}:{self.port}"
-
-    @property
-    def redacted_url(self) -> str:
-        auth = ""
-        if self.login and self.password:
-            auth = "***:***@"
-        return f"{self.scheme}://{auth}{self.host}:{self.port}"
+logger = logging.getLogger(__name__)
 
 
 class CaptchaHandler:
     """
-    Решение hCaptcha (тип nn) через Astrum Solver.
+    Решение капчи через локальный сервер OhMyCaptcha
+    Совместим с YesCaptcha API (createTask / getTaskResult)
     """
-
-    CREATE_TASK_TIMEOUT = 20
-    POLL_TIMEOUT = 20
-    POLL_INTERVAL_SECONDS = 2
-    MAX_POLL_ATTEMPTS = 30
-
-    def __init__(self, wallet: Wallet):
-        self.wallet = wallet
-        self.browser = Browser(wallet=wallet)
-        self.settings = Settings()
-
-    @property
-    def user_agent(self) -> str:
-        return getattr(self.settings, "default_user_agent", None) or (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/136.0.0.0 Safari/537.36"
-        )
-
-    def parse_proxy(self) -> Optional[ProxyConfig]:
-        proxy_raw = getattr(self.wallet, "proxy", None)
-        if not proxy_raw:
-            return None
-
-        parsed = urlparse(proxy_raw if "://" in proxy_raw else f"http://{proxy_raw}")
-        scheme = (parsed.scheme or "http").lower()
-
-        allowed_schemes = {"http", "https", "socks5", "socks4"}
-        if scheme not in allowed_schemes:
-            raise CaptchaError(
-                kind=CaptchaErrorKind.CONFIG,
-                message="Unsupported proxy scheme",
-                details=scheme,
-            )
-
-        if not parsed.hostname or not parsed.port:
-            raise CaptchaError(
-                kind=CaptchaErrorKind.CONFIG,
-                message="Proxy is missing host or port",
-                details=proxy_raw,
-            )
-
-        normalized_scheme = "http" if scheme == "https" else scheme
-
-        return ProxyConfig(
-            scheme=normalized_scheme,
-            host=parsed.hostname,
-            port=parsed.port,
-            login=parsed.username,
-            password=parsed.password,
-        )
-
-    def _redact_value(self, key: str, value: Any) -> Any:
-        lowered = key.lower()
-        if lowered in {"clientkey", "apikey", "api_key", "token", "authorization"}:
-            return "***"
-        if lowered == "proxyurl" and isinstance(value, str):
-            try:
-                parsed = urlparse(value)
-                if parsed.username and parsed.password:
-                    redacted_netloc = f"***:***@{parsed.hostname}:{parsed.port}"
-                else:
-                    redacted_netloc = parsed.netloc
-                redacted = parsed._replace(netloc=redacted_netloc)
-                return urlunparse(redacted)
-            except Exception:
-                return "***"
-        return value
-
-    def _redact_payload(self, payload: Any) -> Any:
-        if isinstance(payload, dict):
-            return {k: self._redact_payload(self._redact_value(k, v)) for k, v in payload.items()}
-        if isinstance(payload, list):
-            return [self._redact_payload(v) for v in payload]
-        return payload
-
-    def _log_debug_payload(self, title: str, payload: dict[str, Any]) -> None:
-        logger.debug(f"{self.wallet} | {title}: {self._redact_payload(payload)}")
-
-    async def _post_json(
-        self,
-        *,
-        url: str,
-        json_payload: dict[str, Any],
-        timeout_seconds: int,
-        operation_name: str,
-    ) -> dict[str, Any]:
-        self._log_debug_payload(operation_name, json_payload)
-
-        try:
-            response = await asyncio.wait_for(
-                self.browser.post(url=url, json=json_payload),
-                timeout=timeout_seconds,
-            )
-        except asyncio.TimeoutError as e:
-            raise CaptchaError(
-                kind=CaptchaErrorKind.TIMEOUT,
-                message=f"{operation_name} timed out",
-            ) from e
-        except Exception as e:
-            raise CaptchaError(
-                kind=CaptchaErrorKind.NETWORK,
-                message=f"{operation_name} request failed",
-                details=str(e),
-            ) from e
-
-        if response.status_code != 200:
-            raise CaptchaError(
-                kind=CaptchaErrorKind.NETWORK,
-                message=f"{operation_name} returned HTTP {response.status_code}",
-                details=(response.text[:500] if getattr(response, "text", None) else None),
-            )
-
-        try:
-            data = response.json()
-        except Exception as e:
-            text_preview = ""
-            try:
-                text_preview = response.text[:500]
-            except Exception:
-                pass
-            raise CaptchaError(
-                kind=CaptchaErrorKind.RESPONSE,
-                message=f"{operation_name} returned non-JSON response",
-                details=text_preview,
-            ) from e
-
-        if not isinstance(data, dict):
-            raise CaptchaError(
-                kind=CaptchaErrorKind.RESPONSE,
-                message=f"{operation_name} returned invalid JSON type",
-                details=type(data).__name__,
-            )
-        return data
-
-    def _validate_api_key_present(self) -> None:
-        api_key = getattr(self.settings, "astrum_api_key", None)
-        if not api_key:
-            raise CaptchaError(
-                kind=CaptchaErrorKind.CONFIG,
-                message="astrum_api_key is missing in settings",
-            )
-
-    def _build_hcaptcha_task_payload(
-        self,
-        website_url: str,
-        site_key: str,
-        rqdata: Optional[str] = None,
-        is_invisible: bool = True,
-    ) -> dict[str, Any]:
-        self._validate_api_key_present()
-
-        task_data: dict[str, Any] = {
-            "type": "nn",
+    
+    def __init__(self, base_url: str = "http://localhost:8000", client_key: str = ""):
+        """
+        :param base_url: URL вашего сервера OhMyCaptcha (по умолчанию http://localhost:8000)
+        :param client_key: CLIENT_KEY из .env файла OhMyCaptcha
+        """
+        self.base_url = base_url.rstrip('/')
+        self.client_key = client_key
+        self.session = httpx.Client(timeout=60.0)
+    
+    def _create_task(self, task_type: str, website_url: str, website_key: str, 
+                     page_action: str = "", proxy: Optional[str] = None) -> Optional[str]:
+        """
+        Создает задачу на решение капчи
+        
+        :return: task_id или None при ошибке
+        """
+        task_data = {
+            "type": task_type,
             "websiteURL": website_url,
-            "siteKey": site_key,
-            "isInvisible": is_invisible,
-            "userAgent": self.user_agent,
+            "websiteKey": website_key
         }
-
-        if rqdata:
-            task_data["rqdata"] = rqdata
-
-        proxy = self.parse_proxy()
+        
+        if page_action:
+            task_data["pageAction"] = page_action
+        
+        # Поддержка прокси (если нужно)
         if proxy:
-            task_data["proxyURL"] = proxy.url
-
-        return {
-            "clientKey": self.settings.astrum_api_key,
-            "task": task_data,
-        }
-
-    async def _create_hcaptcha_task(
-        self,
-        website_url: str,
-        site_key: str,
-        rqdata: Optional[str] = None,
-        is_invisible: bool = True,
-    ) -> str:
-        payload = self._build_hcaptcha_task_payload(
-            website_url=website_url,
-            site_key=site_key,
-            rqdata=rqdata,
-            is_invisible=is_invisible,
-        )
-
-        data = await self._post_json(
-            url="https://solver.astrum.foundation/api/createTask",
-            json_payload=payload,
-            timeout_seconds=self.CREATE_TASK_TIMEOUT,
-            operation_name="createTask",
-        )
-
-        if data.get("errorId") != 0:
-            raise CaptchaError(
-                kind=CaptchaErrorKind.PROVIDER,
-                message="Astrum error creating task",
-                details=data.get("errorDescription", "Unknown error"),
-            )
-
-        task_id = data.get("taskId")
-        if not task_id:
-            raise CaptchaError(
-                kind=CaptchaErrorKind.RESPONSE,
-                message="Astrum response missing taskId",
-            )
-
-        logger.info(f"{self.wallet} | Created Astrum nn task: {task_id}")
-        return task_id
-
-    async def _get_task_result(self, task_id: str) -> dict[str, Any]:
+            # Парсим прокси из строки формата http://user:pass@ip:port
+            task_data["proxyType"] = "http"
+            task_data["proxyAddress"] = proxy.split('@')[-1].split(':')[0]
+            task_data["proxyPort"] = int(proxy.split(':')[-1].split('/')[0])
+            if '@' in proxy:
+                auth = proxy.split('://')[1].split('@')[0]
+                task_data["proxyLogin"] = auth.split(':')[0]
+                task_data["proxyPassword"] = auth.split(':')[1]
+        
         payload = {
-            "clientKey": self.settings.astrum_api_key,
-            "task": {
-                "taskId": task_id,
-                "type": "nn",
-            },
+            "clientKey": self.client_key,
+            "task": task_data
         }
-
-        for attempt in range(self.MAX_POLL_ATTEMPTS):
-            data = await self._post_json(
-                url="https://solver.astrum.foundation/api/getTaskResult",
-                json_payload=payload,
-                timeout_seconds=self.POLL_TIMEOUT,
-                operation_name=f"getTaskResult (attempt {attempt+1})",
-            )
-
-            status = data.get("status")
-            if status == "closed":
-                solution = data.get("solution", {})
-                # Логируем ВЕСЬ ответ для отладки
-                logger.info(f"{self.wallet} | Astrum solution received: {solution}")
-                token = solution.get("token") or solution.get("gRecaptchaResponse")
-                if not token:
-                    raise CaptchaError(
-                        kind=CaptchaErrorKind.RESPONSE,
-                        message="Astrum returned solution without token",
-                        details=str(solution),
-                    )
-                return solution
-            elif status in ("processing", "in_progress", "opened"):
-                await asyncio.sleep(self.POLL_INTERVAL_SECONDS)
-                continue
-            else:
-                raise CaptchaError(
-                    kind=CaptchaErrorKind.PROVIDER,
-                    message=f"Astrum returned unknown status: {status}",
-                    details=data.get("errorDescription"),
-                )
-
-        raise CaptchaError(
-            kind=CaptchaErrorKind.TIMEOUT,
-            message=f"Task {task_id} not solved after {self.MAX_POLL_ATTEMPTS} attempts",
-        )
-
-    async def hcaptcha_token(
-        self,
-        websiteURL: str,
-        siteKey: str,
-        is_invisible: bool = True,
-        rqdata: Optional[str] = None,
-    ) -> str:
-        """
-        Решает hCaptcha через Astrum Solver (тип nn) и возвращает токен.
-        """
-        self._validate_api_key_present()
+        
         try:
-            _ = self._build_hcaptcha_task_payload(
-                website_url=websiteURL,
-                site_key=siteKey,
-                rqdata=rqdata,
-                is_invisible=is_invisible,
+            response = self.session.post(
+                f"{self.base_url}/createTask",
+                json=payload
             )
-        except CaptchaError:
-            raise
+            response.raise_for_status()
+            data = response.json()
+            
+            if data.get("errorId") == 0 and data.get("taskId"):
+                logger.debug(f"Task created: {data['taskId']}")
+                return data["taskId"]
+            else:
+                logger.error(f"Error creating task: {data}")
+                return None
+                
         except Exception as e:
-            raise CaptchaError(
-                kind=CaptchaErrorKind.CONFIG,
-                message="Failed to build hCaptcha request",
-                details=str(e),
-            ) from e
-
-        max_retries = 10
-        for attempt in range(1, max_retries + 1):
+            logger.error(f"Failed to create captcha task: {e}")
+            return None
+    
+    def _get_task_result(self, task_id: str, max_wait: int = 120, poll_interval: int = 5) -> Optional[str]:
+        """
+        Получает результат решения капчи
+        
+        :return: токен решения или None
+        """
+        payload = {
+            "clientKey": self.client_key,
+            "taskId": task_id
+        }
+        
+        start_time = time.time()
+        
+        while time.time() - start_time < max_wait:
             try:
-                task_id = await self._create_hcaptcha_task(
-                    website_url=websiteURL,
-                    site_key=siteKey,
-                    rqdata=rqdata,
-                    is_invisible=is_invisible,
+                response = self.session.post(
+                    f"{self.base_url}/getTaskResult",
+                    json=payload
                 )
-                solution = await self._get_task_result(task_id)
-                token = solution.get("token") or solution.get("gRecaptchaResponse")
-                if token:
-                    logger.success(f"{self.wallet} | hCaptcha solved successfully")
-                    logger.info(f"{self.wallet} | Token (first 80 chars): {token[:80]}...")
-                    return token
+                response.raise_for_status()
+                data = response.json()
+                
+                if data.get("status") == "ready":
+                    # Для разных типов задач токен может быть в разных полях
+                    solution = data.get("solution", {})
+                    token = solution.get("gRecaptchaResponse") or solution.get("token")
+                    if token:
+                        logger.debug(f"Captcha solved: {token[:50]}...")
+                        return token
+                    else:
+                        logger.error(f"No token in solution: {solution}")
+                        return None
+                        
+                elif data.get("status") == "processing":
+                    logger.debug(f"Task {task_id} still processing...")
+                    time.sleep(poll_interval)
+                    continue
                 else:
-                    logger.warning(f"{self.wallet} | Solution missing token: {solution}")
-            except CaptchaError as e:
-                logger.warning(f"{self.wallet} | Attempt {attempt}/{max_retries} failed: {e}")
+                    logger.error(f"Unexpected task status: {data}")
+                    return None
+                    
             except Exception as e:
-                logger.warning(f"{self.wallet} | Attempt {attempt}/{max_retries} unexpected error: {e}")
-
-            await asyncio.sleep(3)
-
-        raise CaptchaError(
-            kind=CaptchaErrorKind.PROVIDER,
-            message=f"All {max_retries} attempts to solve hCaptcha failed",
+                logger.error(f"Failed to get task result: {e}")
+                time.sleep(poll_interval)
+                continue
+        
+        logger.error(f"Timeout waiting for captcha solution (task_id={task_id})")
+        return None
+    
+    def solve_recaptcha_v2(self, website_url: str, website_key: str, 
+                           proxy: Optional[str] = None) -> Optional[str]:
+        """
+        Решает reCAPTCHA v2 (NoCaptchaTaskProxyless)
+        """
+        task_id = self._create_task(
+            task_type="NoCaptchaTaskProxyless",
+            website_url=website_url,
+            website_key=website_key,
+            proxy=proxy
         )
+        if not task_id:
+            return None
+        
+        return self._get_task_result(task_id)
+    
+    def solve_recaptcha_v3(self, website_url: str, website_key: str, 
+                           page_action: str = "homepage",
+                           proxy: Optional[str] = None) -> Optional[str]:
+        """
+        Решает reCAPTCHA v3 (RecaptchaV3TaskProxyless)
+        """
+        task_id = self._create_task(
+            task_type="RecaptchaV3TaskProxyless",
+            website_url=website_url,
+            website_key=website_key,
+            page_action=page_action,
+            proxy=proxy
+        )
+        if not task_id:
+            return None
+        
+        return self._get_task_result(task_id)
+    
+    def solve_hcaptcha(self, website_url: str, website_key: str,
+                       proxy: Optional[str] = None) -> Optional[str]:
+        """
+        Решает hCaptcha (HCaptchaTaskProxyless)
+        """
+        task_id = self._create_task(
+            task_type="HCaptchaTaskProxyless",
+            website_url=website_url,
+            website_key=website_key,
+            proxy=proxy
+        )
+        if not task_id:
+            return None
+        
+        return self._get_task_result(task_id)
+    
+    def solve_turnstile(self, website_url: str, website_key: str,
+                        proxy: Optional[str] = None) -> Optional[str]:
+        """
+        Решает Cloudflare Turnstile (TurnstileTaskProxyless)
+        """
+        task_id = self._create_task(
+            task_type="TurnstileTaskProxyless",
+            website_url=website_url,
+            website_key=website_key,
+            proxy=proxy
+        )
+        if not task_id:
+            return None
+        
+        return self._get_task_result(task_id)
+    
+    def close(self):
+        """Закрывает HTTP сессию"""
+        self.session.close()
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, *args):
+        self.close()
+
+
+# ========== Совместимость со старым интерфейсом Capmonster ==========
+
+class CapmonsterHandler(CaptchaHandler):
+    """
+    Класс-заглушка для обратной совместимости с существующим кодом
+    """
+    
+    def __init__(self, api_key: str = "", base_url: str = "http://localhost:8000", client_key: str = ""):
+        """
+        :param api_key: игнорируется, оставлен для совместимости
+        :param base_url: URL вашего OhMyCaptcha
+        :param client_key: CLIENT_KEY из .env OhMyCaptcha
+        """
+        super().__init__(base_url=base_url, client_key=client_key)
+    
+    def solve_captcha(self, website_url: str, website_key: str) -> Optional[str]:
+        """
+        Основной метод, который используется в коде Neuraverse
+        По умолчанию использует reCAPTCHA v2
+        """
+        return self.solve_recaptcha_v2(website_url, website_key)
