@@ -70,17 +70,12 @@ class PrivyAuth:
             "platform": "Windows",
         }
         
-        # Добавляем cookies из кошелька (если есть)
+        # Добавляем cookies из кошелька (все куки)
         if self.wallet.cookies:
-            # Берем все cookies, не только privy-специфичные
             params["cookies"] = self.wallet.cookies
             logger.debug(f"Using {len(self.wallet.cookies)} cookies from wallet")
         
-        # Если в сессии есть user-agent, используем его (пока нет, но на будущее)
-        if hasattr(self.session, 'user_agent') and self.session.user_agent:
-            params["userAgent"] = self.session.user_agent
-        
-        # Добавляем прокси информацию (опционально, для диагностики)
+        # Добавляем прокси для диагностики
         if self.wallet.proxy:
             params["proxy"] = self.wallet.proxy
         
@@ -290,7 +285,6 @@ class PrivyAuth:
                 raise ValueError("Captcha token missing")
 
             logger.info(f"{self.wallet} | Captcha token obtained, length: {len(captcha_token)}")
-            logger.debug(f"{self.wallet} | Full token: {captcha_token}")
 
         except Exception as e:
             logger.error(f"{self.wallet} | Failed to obtain captcha token — {e}")
@@ -331,126 +325,3 @@ class PrivyAuth:
                 for k, v in (self.wallet.cookies or {}).items()
                 if k in {
                     "privy-token",
-                    "privy-id-token",
-                    "privy-session",
-                    "privy-refresh-token",
-                    "privy-access-token",
-                }
-            }
-
-            headers = {
-                **self.headers,
-                "authorization": f"Bearer {self.wallet.identity_token}",
-            }
-
-            utc_time_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-
-            payload = {
-                "event_name": "sdk_authenticate_siwe",
-                "client_id": self.token_id,
-                "payload": {
-                    "connectorType": "injected",
-                    "walletClientType": "metamask",
-                    "clientTimestamp": utc_time_now,
-                },
-            }
-
-            response = await self.session.post(
-                url=f"{self.BASE_URL}/analytics_events",
-                cookies=cookies,
-                headers=headers,
-                json=payload,
-            )
-            if response.status_code != 200:
-                logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
-                return False
-
-            payload = {
-                "event_name": "sdk_authenticate",
-                "client_id": self.token_id,
-                "payload": {
-                    "method": "siwe",
-                    "isNewUser": is_new_user,
-                    "clientTimestamp": utc_time_now,
-                },
-            }
-
-            response = await self.session.post(
-                url=f"{self.BASE_URL}/analytics_events",
-                cookies=cookies,
-                headers=headers,
-                json=payload,
-            )
-            if response.status_code != 200:
-                logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
-                return False
-
-            return True
-
-        except Exception as e:
-            logger.error(f"{self.wallet} | Analytics event processing failed — {e}")
-            return False
-
-    def siwe_message(self, nonce: str) -> str:
-        issued_at = datetime.utcnow().isoformat() + "Z"
-
-        return (
-            "neuraverse.neuraprotocol.io wants you to sign in with your Ethereum account:\n"
-            f"{self.wallet.address}\n\n"
-            "By signing, you are proving you own this wallet and logging in. "
-            "This does not initiate a transaction or cost any fees.\n\n"
-            "URI: https://neuraverse.neuraprotocol.io\n"
-            "Version: 1\n"
-            "Chain ID: 267\n"
-            f"Nonce: {nonce}\n"
-            f"Issued At: {issued_at}\n"
-            "Resources:\n"
-            "- https://privy.io"
-        )
-
-    def resolve_privy_ca_id(self) -> str:
-        wallet_addr = (self.wallet.address or "").lower()
-        proxy_raw = self.wallet.proxy or ""
-        proxy_norm = self.normalize_proxy(proxy_raw)
-
-        seed = f"{wallet_addr}|{proxy_norm}" if proxy_norm else wallet_addr
-        return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
-
-    def normalize_proxy(self, proxy: str) -> str:
-        if not proxy:
-            return ""
-
-        try:
-            p = urlparse(proxy if "://" in proxy else f"http://{proxy}")
-            host = p.hostname or ""
-            port = p.port
-
-            if not host or not port:
-                return ""
-
-            return f"{host}:{port}"
-
-        except Exception:
-            return ""
-
-    def extract_privy_tokens(self, set_cookie: str | None) -> Dict[str, str]:
-        wanted = {
-            "privy-token",
-            "privy-id-token",
-            "privy-refresh-token",
-            "privy-access-token",
-            "privy-session",
-        }
-        result: Dict[str, str] = {}
-
-        if not set_cookie:
-            return result
-
-        for match in re.finditer(r"(?P<name>[^=;,\s]+)=(?P<value>[^;\r\n,]+)", set_cookie):
-            name = match.group("name").strip()
-            value = match.group("value").strip()
-
-            if name in wanted:
-                result[name] = value
-
-        return result
