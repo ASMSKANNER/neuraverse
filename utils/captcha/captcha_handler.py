@@ -1,7 +1,7 @@
 import httpx
 import time
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any
 from urllib.parse import urlparse
 from loguru import logger
 
@@ -57,10 +57,13 @@ class CaptchaHandler:
             return None
     
     def _create_task(self, task_type: str, website_url: str, website_key: str, 
-                     page_action: str = "", is_invisible: bool = True) -> Optional[str]:
+                     page_action: str = "", is_invisible: bool = True,
+                     browser_params: Dict[str, Any] = None) -> Optional[str]:
         """
         Создаёт задачу в OhMyCaptcha.
         Поддерживает прокси (если у кошелька есть) и параметр isInvisible.
+        
+        :param browser_params: параметры браузера (userAgent, viewport, locale, cookies)
         """
         if not self.ohmycaptcha_client_key:
             logger.error("OhMyCaptcha client key missing")
@@ -79,6 +82,32 @@ class CaptchaHandler:
         if task_type in ("HCaptchaTaskProxyless", "HCaptchaTask"):
             task_data["isInvisible"] = is_invisible
             logger.debug(f"Set isInvisible={is_invisible} for hCaptcha task")
+        
+        # Добавляем параметры браузера, если переданы
+        if browser_params:
+            if "userAgent" in browser_params:
+                task_data["userAgent"] = browser_params["userAgent"]
+                logger.debug(f"Set userAgent: {browser_params['userAgent'][:50]}...")
+            
+            if "viewport" in browser_params:
+                task_data["viewport"] = browser_params["viewport"]
+                logger.debug(f"Set viewport: {browser_params['viewport']}")
+            
+            if "locale" in browser_params:
+                task_data["locale"] = browser_params["locale"]
+                logger.debug(f"Set locale: {browser_params['locale']}")
+            
+            if "platform" in browser_params:
+                task_data["platform"] = browser_params["platform"]
+                logger.debug(f"Set platform: {browser_params['platform']}")
+            
+            if "cookies" in browser_params and browser_params["cookies"]:
+                # Преобразуем cookies в формат, понятный OhMyCaptcha
+                cookie_list = []
+                for name, value in browser_params["cookies"].items():
+                    cookie_list.append({"name": name, "value": value})
+                task_data["cookies"] = cookie_list
+                logger.debug(f"Set {len(cookie_list)} cookies")
         
         # Добавляем прокси, если у кошелька есть
         if self.wallet and hasattr(self.wallet, 'proxy') and self.wallet.proxy:
@@ -167,10 +196,15 @@ class CaptchaHandler:
     
     # ========== Основные методы для решения капчи ==========
     
-    async def hcaptcha_token(self, websiteURL: str, siteKey: str, is_invisible: bool = True) -> Optional[str]:
+    async def hcaptcha_token(self, websiteURL: str, siteKey: str, is_invisible: bool = True,
+                             browser_params: Dict[str, Any] = None) -> Optional[str]:
         """
         Решение hCaptcha через OhMyCaptcha
-        Асинхронный метод для совместимости со старым интерфейсом Neuraverse
+        
+        :param websiteURL: URL страницы с капчей
+        :param siteKey: hCaptcha sitekey
+        :param is_invisible: является ли капча невидимой
+        :param browser_params: параметры браузера (userAgent, viewport, locale, cookies)
         """
         logger.debug(f"Solving hCaptcha with OhMyCaptcha: {websiteURL}")
         
@@ -178,14 +212,15 @@ class CaptchaHandler:
             task_type="HCaptchaTaskProxyless",
             website_url=websiteURL,
             website_key=siteKey,
-            is_invisible=is_invisible
+            is_invisible=is_invisible,
+            browser_params=browser_params
         )
         if not task_id:
             return None
         
         return self._get_task_result(task_id)
     
-    async def recaptcha_v2_token(self, websiteURL: str, siteKey: str) -> Optional[str]:
+    async def recaptcha_v2_token(self, websiteURL: str, siteKey: str, browser_params: Dict[str, Any] = None) -> Optional[str]:
         """
         Решение reCAPTCHA v2 через OhMyCaptcha
         """
@@ -194,14 +229,16 @@ class CaptchaHandler:
         task_id = self._create_task(
             task_type="NoCaptchaTaskProxyless",
             website_url=websiteURL,
-            website_key=siteKey
+            website_key=siteKey,
+            browser_params=browser_params
         )
         if not task_id:
             return None
         
         return self._get_task_result(task_id)
     
-    async def recaptcha_v3_token(self, websiteURL: str, siteKey: str, action: str = "homepage") -> Optional[str]:
+    async def recaptcha_v3_token(self, websiteURL: str, siteKey: str, action: str = "homepage",
+                                  browser_params: Dict[str, Any] = None) -> Optional[str]:
         """
         Решение reCAPTCHA v3 через OhMyCaptcha
         """
@@ -211,14 +248,15 @@ class CaptchaHandler:
             task_type="RecaptchaV3TaskProxyless",
             website_url=websiteURL,
             website_key=siteKey,
-            page_action=action
+            page_action=action,
+            browser_params=browser_params
         )
         if not task_id:
             return None
         
         return self._get_task_result(task_id)
     
-    async def turnstile_token(self, websiteURL: str, siteKey: str) -> Optional[str]:
+    async def turnstile_token(self, websiteURL: str, siteKey: str, browser_params: Dict[str, Any] = None) -> Optional[str]:
         """
         Решение Cloudflare Turnstile через OhMyCaptcha
         """
@@ -227,7 +265,8 @@ class CaptchaHandler:
         task_id = self._create_task(
             task_type="TurnstileTaskProxyless",
             website_url=websiteURL,
-            website_key=siteKey
+            website_key=siteKey,
+            browser_params=browser_params
         )
         if not task_id:
             return None
