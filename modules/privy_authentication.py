@@ -283,7 +283,6 @@ class PrivyAuth:
                 raise ValueError("Captcha token missing")
     
             logger.info(f"{self.wallet} | Captcha token obtained, length: {len(captcha_token)}")
-            logger.debug(f"{self.wallet} | Full token: {captcha_token}")
     
         except Exception as e:
             logger.error(f"{self.wallet} | Failed to obtain captcha token — {e}")
@@ -294,12 +293,20 @@ class PrivyAuth:
             "token": captcha_token,
         }
     
+        # Добавляем заголовки браузера, которые Privy ожидает
+        headers = {
+            **self.headers,
+            "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+        }
+    
         logger.info(f"{self.wallet} | Sending to /siwe/init: {payload}")
     
         try:
             response = await self.session.post(
                 url=f"{self.BASE_URL}/siwe/init",
-                headers=self.headers,
+                headers=headers,
                 json=payload,
             )
             
@@ -319,7 +326,7 @@ class PrivyAuth:
         except Exception as e:
             logger.error(f"{self.wallet} | get_nonce(): request/parse error — {e}")
             raise
-
+        
     async def send_analytics_events(self, is_new_user: bool) -> bool:
         try:
             cookies = {
