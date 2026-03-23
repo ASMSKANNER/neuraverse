@@ -105,4 +105,184 @@ class CaptchaHandler:
                 # Преобразуем cookies в формат, понятный OhMyCaptcha
                 cookie_list = []
                 for name, value in browser_params["cookies"].items():
-                    cookie_list.append({"name": name
+                    cookie_list.append({"name": name, "value": value})
+                task_data["cookies"] = cookie_list
+                logger.debug(f"Set {len(cookie_list)} cookies")
+        
+        # Добавляем прокси, если у кошелька есть
+        if self.wallet and hasattr(self.wallet, 'proxy') and self.wallet.proxy:
+            proxy_config = self._parse_proxy(self.wallet.proxy)
+            if proxy_config:
+                task_data.update(proxy_config)
+                logger.info(f"Using proxy for captcha: {proxy_config['proxyAddress']}:{proxy_config['proxyPort']}")
+            else:
+                logger.warning(f"Could not parse proxy: {self.wallet.proxy}")
+        else:
+            logger.debug("No proxy provided for captcha task")
+        
+        # Log final task data keys for debugging
+        logger.debug(f"Task data keys: {list(task_data.keys())}")
+        
+        payload = {
+            "clientKey": self.ohmycaptcha_client_key,
+            "task": task_data
+        }
+        
+        try:
+            response = self.session.post(
+                f"{self.ohmycaptcha_url}/createTask",
+                json=payload
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            if data.get("errorId") == 0 and data.get("taskId"):
+                logger.debug(f"OhMyCaptcha task created: {data['taskId']}")
+                return data["taskId"]
+            else:
+                logger.error(f"OhMyCaptcha error: {data}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Failed to create OhMyCaptcha task: {e}")
+            return None
+    
+    def _get_task_result(self, task_id: str, max_wait: int = 300, poll_interval: int = 5) -> Optional[str]:
+        """
+        Получает результат из OhMyCaptcha
+        """
+        if not self.ohmycaptcha_client_key:
+            logger.error("OhMyCaptcha client key missing")
+            return None
+            
+        payload = {
+            "clientKey": self.ohmycaptcha_client_key,
+            "taskId": task_id
+        }
+        
+        start_time = time.time()
+        
+        while time.time() - start_time < max_wait:
+            try:
+                response = self.session.post(
+                    f"{self.ohmycaptcha_url}/getTaskResult",
+                    json=payload
+                )
+                response.raise_for_status()
+                data = response.json()
+                
+                if data.get("status") == "ready":
+                    solution = data.get("solution", {})
+                    token = solution.get("gRecaptchaResponse") or solution.get("token")
+                    if token:
+                        logger.debug(f"OhMyCaptcha solved: {token[:50]}...")
+                        return token
+                    else:
+                        logger.error(f"No token in solution: {solution}")
+                        return None
+                        
+                elif data.get("status") == "processing":
+                    logger.debug(f"OhMyCaptcha task {task_id} processing...")
+                    time.sleep(poll_interval)
+                    continue
+                else:
+                    logger.error(f"Unexpected OhMyCaptcha status: {data}")
+                    return None
+                    
+            except Exception as e:
+                logger.error(f"Failed to get OhMyCaptcha result: {e}")
+                time.sleep(poll_interval)
+                continue
+        
+        logger.error(f"OhMyCaptcha timeout for task {task_id}")
+        return None
+    
+    # ========== Основные методы для решения капчи ==========
+    
+    async def hcaptcha_token(self, websiteURL: str, siteKey: str, is_invisible: bool = True,
+                             browser_params: Dict[str, Any] = None) -> Optional[str]:
+        """
+        Решение hCaptcha через OhMyCaptcha
+        
+        :param websiteURL: URL страницы с капчей
+        :param siteKey: hCaptcha sitekey
+        :param is_invisible: является ли капча невидимой
+        :param browser_params: параметры браузера (userAgent, viewport, locale, cookies)
+        """
+        logger.debug(f"Solving hCaptcha with OhMyCaptcha: {websiteURL}")
+        
+        task_id = self._create_task(
+            task_type="HCaptchaTaskProxyless",
+            website_url=websiteURL,
+            website_key=siteKey,
+            is_invisible=is_invisible,
+            browser_params=browser_params
+        )
+        if not task_id:
+            return None
+        
+        return self._get_task_result(task_id)
+    
+    async def recaptcha_v2_token(self, websiteURL: str, siteKey: str, browser_params: Dict[str, Any] = None) -> Optional[str]:
+        """
+        Решение reCAPTCHA v2 через OhMyCaptcha
+        """
+        logger.debug(f"Solving reCAPTCHA v2 with OhMyCaptcha: {websiteURL}")
+        
+        task_id = self._create_task(
+            task_type="NoCaptchaTaskProxyless",
+            website_url=websiteURL,
+            website_key=siteKey,
+            browser_params=browser_params
+        )
+        if not task_id:
+            return None
+        
+        return self._get_task_result(task_id)
+    
+    async def recaptcha_v3_token(self, websiteURL: str, siteKey: str, action: str = "homepage",
+                                  browser_params: Dict[str, Any] = None) -> Optional[str]:
+        """
+        Решение reCAPTCHA v3 через OhMyCaptcha
+        """
+        logger.debug(f"Solving reCAPTCHA v3 with OhMyCaptcha: {websiteURL}")
+        
+        task_id = self._create_task(
+            task_type="RecaptchaV3TaskProxyless",
+            website_url=websiteURL,
+            website_key=siteKey,
+            page_action=action,
+            browser_params=browser_params
+        )
+        if not task_id:
+            return None
+        
+        return self._get_task_result(task_id)
+    
+    async def turnstile_token(self, websiteURL: str, siteKey: str, browser_params: Dict[str, Any] = None) -> Optional[str]:
+        """
+        Решение Cloudflare Turnstile через OhMyCaptcha
+        """
+        logger.debug(f"Solving Turnstile with OhMyCaptcha: {websiteURL}")
+        
+        task_id = self._create_task(
+            task_type="TurnstileTaskProxyless",
+            website_url=websiteURL,
+            website_key=siteKey,
+            browser_params=browser_params
+        )
+        if not task_id:
+            return None
+        
+        return self._get_task_result(task_id)
+    
+    def close(self):
+        """Закрывает HTTP сессию"""
+        if hasattr(self, 'session') and self.session:
+            self.session.close()
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, *args):
+        self.close()
