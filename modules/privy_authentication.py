@@ -61,7 +61,7 @@ class PrivyAuth:
     def _get_browser_params(self) -> Dict[str, Any]:
         """
         Получает параметры браузера для передачи в OhMyCaptcha.
-        Использует те же настройки, что и Browser класс.
+        Использует реальные cookies из кошелька и стандартные настройки.
         """
         params = {
             "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -70,15 +70,21 @@ class PrivyAuth:
             "platform": "Windows",
         }
         
-        # Добавляем cookies если есть
-        if self.cookies:
-            params["cookies"] = self.cookies
+        # Добавляем cookies из кошелька (если есть)
+        if self.wallet.cookies:
+            # Берем все cookies, не только privy-специфичные
+            params["cookies"] = self.wallet.cookies
+            logger.debug(f"Using {len(self.wallet.cookies)} cookies from wallet")
         
-        # Если в сессии есть user-agent, используем его
+        # Если в сессии есть user-agent, используем его (пока нет, но на будущее)
         if hasattr(self.session, 'user_agent') and self.session.user_agent:
             params["userAgent"] = self.session.user_agent
         
-        logger.debug(f"Browser params prepared: userAgent={params['userAgent'][:50]}..., viewport={params['viewport']}")
+        # Добавляем прокси информацию (опционально, для диагностики)
+        if self.wallet.proxy:
+            params["proxy"] = self.wallet.proxy
+        
+        logger.debug(f"Browser params prepared: userAgent={params['userAgent'][:50]}..., viewport={params['viewport']}, cookies_count={len(params.get('cookies', {}))}")
         return params
 
     def _persist_auth_state(self, session_token: str, identity_token: str, cookies: dict) -> None:
