@@ -115,7 +115,7 @@ class CaptchaHandler:
             logger.error(f"Failed to create OhMyCaptcha task: {e}")
             return None
     
-    def _get_task_result(self, task_id: str, max_wait: int = 120, poll_interval: int = 5) -> Optional[str]:
+    def _get_task_result(self, task_id: str, max_wait: int = 300, poll_interval: int = 5) -> Optional[str]:
         """
         Получает результат из OhMyCaptcha
         """
