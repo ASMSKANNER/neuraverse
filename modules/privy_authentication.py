@@ -269,51 +269,53 @@ class PrivyAuth:
         try:
             captcha_handler = CaptchaHandler(wallet=self.wallet)
             
-            # Получаем параметры браузера
             browser_params = self._get_browser_params()
             logger.debug(f"{self.wallet} | Browser params: {list(browser_params.keys())}")
-
-            # Решаем hCaptcha через OhMyCaptcha с параметрами браузера
+    
             captcha_token = await captcha_handler.hcaptcha_token(
                 websiteURL="https://neuraverse.neuraprotocol.io/",
                 siteKey="b9fc5a50-2e5c-457a-9582-80ce342c2534",
                 is_invisible=True,
                 browser_params=browser_params,
             )
-
+    
             if not captcha_token:
                 raise ValueError("Captcha token missing")
-
+    
             logger.info(f"{self.wallet} | Captcha token obtained, length: {len(captcha_token)}")
-
+            logger.debug(f"{self.wallet} | Full token: {captcha_token}")
+    
         except Exception as e:
             logger.error(f"{self.wallet} | Failed to obtain captcha token — {e}")
             raise
-
+    
         payload = {
             "address": self.wallet.address,
             "token": captcha_token,
         }
-        
-         logger.info(f"{self.wallet} | Sending to /siwe/init: {payload}")
-
+    
+        logger.info(f"{self.wallet} | Sending to /siwe/init: {payload}")
+    
         try:
             response = await self.session.post(
                 url=f"{self.BASE_URL}/siwe/init",
                 headers=self.headers,
                 json=payload,
             )
+            
+            logger.info(f"{self.wallet} | Response: {response.status_code} - {response.text}")
+            
             if response.status_code != 200:
                 logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
                 raise RuntimeError("Failed to get nonce")
-
+    
             nonce = response.json().get("nonce")
             if not nonce:
                 logger.error(f"{self.wallet} | Nonce missing in response body")
                 raise ValueError("Nonce missing in response")
-
+    
             return nonce
-
+    
         except Exception as e:
             logger.error(f"{self.wallet} | get_nonce(): request/parse error — {e}")
             raise
