@@ -294,6 +294,8 @@ class PrivyAuth:
             "address": self.wallet.address,
             "token": captcha_token,
         }
+        
+         logger.info(f"{self.wallet} | Sending to /siwe/init: {payload}")
 
         try:
             response = await self.session.post(
