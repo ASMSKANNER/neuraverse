@@ -2,7 +2,7 @@ import asyncio
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Dict
+from typing import Dict, Any
 from urllib.parse import urlparse
 
 from eth_account.messages import encode_defunct
@@ -57,6 +57,29 @@ class PrivyAuth:
                 "privy-access-token",
             }
         }
+
+    def _get_browser_params(self) -> Dict[str, Any]:
+        """
+        Получает параметры браузера для передачи в OhMyCaptcha.
+        Использует те же настройки, что и Browser класс.
+        """
+        params = {
+            "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "viewport": {"width": 1920, "height": 1080},
+            "locale": "en-US",
+            "platform": "Windows",
+        }
+        
+        # Добавляем cookies если есть
+        if self.cookies:
+            params["cookies"] = self.cookies
+        
+        # Если в сессии есть user-agent, используем его
+        if hasattr(self.session, 'user_agent') and self.session.user_agent:
+            params["userAgent"] = self.session.user_agent
+        
+        logger.debug(f"Browser params prepared: userAgent={params['userAgent'][:50]}..., viewport={params['viewport']}")
+        return params
 
     def _persist_auth_state(self, session_token: str, identity_token: str, cookies: dict) -> None:
         update_wallet_info(address=self.wallet.address, name_column="session_token", data=session_token)
@@ -244,12 +267,17 @@ class PrivyAuth:
     async def get_nonce(self) -> str:
         try:
             captcha_handler = CaptchaHandler(wallet=self.wallet)
+            
+            # Получаем параметры браузера
+            browser_params = self._get_browser_params()
+            logger.debug(f"{self.wallet} | Browser params: {list(browser_params.keys())}")
 
-            # Решаем hCaptcha через OhMyCaptcha (или через fallback, если настроено)
+            # Решаем hCaptcha через OhMyCaptcha с параметрами браузера
             captcha_token = await captcha_handler.hcaptcha_token(
                 websiteURL="https://neuraverse.neuraprotocol.io/",
                 siteKey="b9fc5a50-2e5c-457a-9582-80ce342c2534",
                 is_invisible=True,
+                browser_params=browser_params,
             )
 
             if not captcha_token:
