@@ -120,6 +120,9 @@ class CaptchaHandler:
         else:
             logger.debug("No proxy provided for captcha task")
         
+        # Log final task data keys for debugging
+        logger.debug(f"Task data keys: {list(task_data.keys())}")
+        
         payload = {
             "clientKey": self.ohmycaptcha_client_key,
             "task": task_data
