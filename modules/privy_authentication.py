@@ -38,7 +38,7 @@ class PrivyAuth:
             **DEFAULT_HEADERS,
             "privy-app-id": "cmbpempz2011ll10l7iucga14",
             "privy-ca-id": self.token_id,
-            "privy-client": "react-auth:2.25.0",
+            "privy-client": "react-auth:3.12.0",  # Обновлено с 2.25.0 на 3.12.0
         }
 
     def __repr__(self):
@@ -64,7 +64,7 @@ class PrivyAuth:
         Использует реальные cookies из кошелька и стандартные настройки.
         """
         params = {
-            "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
             "viewport": {"width": 1920, "height": 1080},
             "locale": "en-US",
             "platform": "Windows",
@@ -290,15 +290,10 @@ class PrivyAuth:
             logger.error(f"{self.wallet} | Failed to obtain captcha token — {e}")
             raise
 
-        # Формируем payload для запроса
         payload = {
             "address": self.wallet.address,
             "token": captcha_token,
         }
-        
-        # Логируем полный запрос для отладки
-        logger.info(f"{self.wallet} | Sending payload to /siwe/init: {payload}")
-        logger.info(f"{self.wallet} | Headers: {self.headers}")
 
         try:
             response = await self.session.post(
@@ -306,12 +301,6 @@ class PrivyAuth:
                 headers=self.headers,
                 json=payload,
             )
-            
-            # Логируем полный ответ для отладки
-            logger.info(f"{self.wallet} | Response status: {response.status_code}")
-            logger.info(f"{self.wallet} | Response headers: {dict(response.headers)}")
-            logger.info(f"{self.wallet} | Response body: {response.text}")
-            
             if response.status_code != 200:
                 logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
                 raise RuntimeError("Failed to get nonce")
