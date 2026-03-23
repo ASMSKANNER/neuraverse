@@ -290,12 +290,15 @@ class PrivyAuth:
             logger.error(f"{self.wallet} | Failed to obtain captcha token — {e}")
             raise
 
+        # Формируем payload для запроса
         payload = {
             "address": self.wallet.address,
             "token": captcha_token,
         }
-
-        logger.debug(f"{self.wallet} | Sending to /siwe/init: address={self.wallet.address}, token_length={len(captcha_token)}")
+        
+        # Логируем полный запрос для отладки
+        logger.info(f"{self.wallet} | Sending payload to /siwe/init: {payload}")
+        logger.info(f"{self.wallet} | Headers: {self.headers}")
 
         try:
             response = await self.session.post(
@@ -303,6 +306,12 @@ class PrivyAuth:
                 headers=self.headers,
                 json=payload,
             )
+            
+            # Логируем полный ответ для отладки
+            logger.info(f"{self.wallet} | Response status: {response.status_code}")
+            logger.info(f"{self.wallet} | Response headers: {dict(response.headers)}")
+            logger.info(f"{self.wallet} | Response body: {response.text}")
+            
             if response.status_code != 200:
                 logger.error(f"{self.wallet} | Non-200 response ({response.status_code}). Body: {response.text}")
                 raise RuntimeError("Failed to get nonce")
